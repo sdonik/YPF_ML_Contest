@@ -38,7 +38,7 @@
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">2 | Enfoque de la solución</div>
 #
-# La variable target tiene
+# La variable target tiene,
 #
 # Desde un principio, haciendo un leve análisis de los datos y con consultas en el workshop, se detectó que los datasets de train y validación están spliteados al azar sin considerar temporalidad, esto nos dejo abierta la puerta para plantear un modelo baseline tomando el primer delta futuro conocido.
 #
@@ -60,7 +60,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 pd.set_option('display.float_format', lambda x: '%.3f' % x)
 pd.set_option('display.max_columns', 500)
@@ -132,6 +132,9 @@ def mse_ceros(df):
     print("MSE para ceros:")
     print(mean_squared_error(df.loc[df.type == 'Train', 'delta_WHP'], np.zeros(26178)))
 
+    print("MAE para ceros:")
+    print(mean_absolute_error(df.loc[df.type == 'Train', 'delta_WHP'], np.zeros(26178)))
+
 
 mse_ceros(df)
 # -
@@ -198,6 +201,8 @@ aux2['delta_WHP'] = aux2['delta_WHP'].fillna(0)
 aux2['original_delta'] = df.loc[df.type == 'Train', 'delta_WHP']
 print("\nMSE medias por Pad:")
 displayhook(mean_squared_error(aux2['original_delta'], aux2['delta_WHP']))
+print("\nMAE medias por Pad:")
+displayhook(mean_absolute_error(aux2['original_delta'], aux2['delta_WHP']))
 
 aux2.to_csv(submission_folder + 'baseline_meanpad_train.csv', index=False, header=False)
 # -
@@ -281,6 +286,13 @@ df.estimated_delta = df.estimated_delta.fillna(0)
 print("\nMSE para estimacion:")
 print(
     mean_squared_error(
+        df.loc[df.type == 'Train', 'delta_WHP'],
+        df.loc[df.type == 'Train', 'estimated_delta'],
+    )
+)
+print("\nMAE para estimacion:")
+print(
+    mean_absolute_error(
         df.loc[df.type == 'Train', 'delta_WHP'],
         df.loc[df.type == 'Train', 'estimated_delta'],
     )
