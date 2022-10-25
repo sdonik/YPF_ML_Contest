@@ -61,6 +61,7 @@ import pandas as pd
 import plotly.express as px
 import seaborn as sns
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import train_test_split
 
 pd.set_option('display.float_format', lambda x: '%.3f' % x)
 pd.set_option('display.max_columns', 500)
@@ -228,7 +229,7 @@ px.box(aux, width=400, height=400, title="n hijos por padre")
 
 # ### Data Leakeage
 
-# Los eventos tienen un orden temporal, si bien en este dataset no tenemos información de este tipo, tenemos las etapas de perforación de cada pozo, que si marcan un orden.
+# Los eventos tienen un orden temporal, si bien en este dataset no fechas, tenemos las etapas de perforación de cada pozo, que si marcan un orden.
 #
 # Por otro lado sabemos que la data de evalución se armó aleatoriamente, es decir sin tener en cuenta las etapas, por lo cual podríamos tener data futura de como esta el pozo de relevancia para la competencia (obviamente esta data no se podría usar en un modelo productivo).
 #
@@ -269,13 +270,16 @@ df['diff_stages'] = df['next_stage'] - df['ETAPA_HIJO']
 # +
 mse_ceros(df)
 
+
 # if there is more than one stage between rows put delta 0
 df.loc[(df['diff_stages'] != 1), 'estimated_delta'] = 0.0
 # if delta is lower than 1 consider as noise
 df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
 # if delta is bigger than common delta values put fence value
-df.loc[(df['estimated_delta'] > 30), 'estimated_delta'] = 30.0
-df.loc[(df['estimated_delta'] < -15), 'estimated_delta'] = -15.0
+upper_fence = 13.3
+lower_fence = 0
+df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
+df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
 # if prev delta value is 0, put 0 value
 df.loc[
     ((df['prev_delta'] == 0.0) | (df['prev_delta'].isna())) & (df.prev_type != 'Test'),
@@ -300,17 +304,18 @@ print(
 
 # -
 
-# Veamos el MSE por pozo padre para los peores casos
+# Veamos el MAE por pozo padre para los peores casos
 
 aux = (
     df[(df.type == 'Train')]
     .groupby(['CAMPO', 'PAD_HIJO', 'PADRE'])
-    .apply(lambda x: mean_squared_error(x['delta_WHP'], x['estimated_delta']))
+    .apply(lambda x: mean_absolute_error(x['delta_WHP'], x['estimated_delta']))
 )
-aux[aux > 59]
+aux[aux > 1.44]
 
+pozo_padre = 'Pozo 5'
 df.loc[
-    (df.PADRE == 'Pozo 29') & (df.HIJO == 'Pozo 466'),
+    (df.PADRE == pozo_padre),
     [
         'CAMPO',
         'PAD_HIJO',
@@ -327,7 +332,6 @@ df.loc[
     ],
 ]
 
-pozo_padre = 'Pozo 29'
 aux = df.loc[
     df.PADRE == pozo_padre,
     [
@@ -353,15 +357,18 @@ fig = px.line(
     hover_data=['type', 'delta_WHP', 'estimated_delta', 'diff_stages'],
     width=800,
     height=300,
+    title="Presión inicial por etapa",
 )
 fig.show()
 
 fig = px.line(
-    df[(df.PADRE == 'Pozo 29') & (df.HIJO == 'Pozo 466')],
+    df[(df.PADRE == pozo_padre)],  # & (df.HIJO == 'Pozo 466')],
     x="ETAPA_HIJO",
     y="delta_WHP",
+    color="HIJO",
     width=800,
     height=300,
+    title="Delta por etapa",
 )
 fig.show()
 
@@ -373,7 +380,7 @@ baseline2.to_csv(
 )
 
 
-# > El score de este submit da 1.4157 no estaríamos mejorando
+# > El score de este submit da 1.4157 no estaríamos mejorando (hasta este momento solo estaba revisando contra MSE, de aquí en mas ya mi métrica será MAE)
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
@@ -415,8 +422,8 @@ def validate_model(df, target_col, feat_cols, params):
     Returns:
         Booster, array: modelo, lista de predicciones
     """
-    train_filter = df['SetType'] == 'Train'
-    valid_filter = df['SetType'] == 'Validation'
+    train_filter = df['type'] == 'Train'
+    valid_filter = df['type'] == 'Validation'
     list_str_obj_cols = df[feat_cols].columns[df[feat_cols].dtypes == "object"].tolist()
     for str_obj_col in list_str_obj_cols:
         df[str_obj_col] = df[str_obj_col].astype("category")
@@ -443,7 +450,7 @@ def validate_model(df, target_col, feat_cols, params):
     )
     print(gbm.best_iteration)
     y_pred = gbm.predict(X_valid)
-    mae = mean_squared_error(y_valid, y_pred)
+    mae = mean_absolute_error(y_valid, y_pred)
     print("Best MAE:", mae)
 
     feat_importance = pd.DataFrame()
@@ -489,18 +496,40 @@ def validate_model(df, target_col, feat_cols, params):
 # ### Features
 
 # + id="KhHfwjnkdQQK"
-header_cols = []
-model_features = []
-target = ''
+header_cols = ['ID_FILA', 'ID_EVENTO', 'type', 'prev_type']
+model_features = [
+    'CAMPO',
+    'FLUIDO',
+    'PAD_HIJO',
+    'HIJO',
+    'ETAPA_HIJO',
+    'PADRE',
+    'D3D',
+    'D2D',
+    'DZ',
+    'AZ',
+    '#_BARRERAS',
+    'LINEAMIENTO',
+    'WHP_i',
+    'ESTADO',
+    'type',
+    'next_initial_pressure',
+    'next_stage',
+    'prev_delta',
+    'prev_type',
+    'estimated_delta',
+    'diff_stages',
+]
+target = 'delta_WHP'
 # -
 
 # ### Optimización parámetros
 
 # Proceso de optimización de hiperparámetros del algortimo, puesto en false por defecto ya que es un poco lento (no mas de 10 min), de aquí salieron los parámetros seteados a continuación.
 
+# +
 # if TUNE_PARAMETERS:
 #     from verstack import LGBMTuner
-
 #     train_filter = df['SetType'] == 'Train'
 #     valid_filter = df['SetType'] == 'Validation'
 #     list_str_obj_cols = (
@@ -511,7 +540,6 @@ target = ''
 #     print(
 #         f'Categorical columns:{df[model_features].columns[df[model_features].dtypes == "category"]}'
 #     )
-
 #     X_train, y_train = (
 #         df.loc[train_filter, model_features],
 #         df.loc[train_filter, target],
@@ -525,30 +553,46 @@ target = ''
 #     tuner.fit(X_train, y_train)
 #     # check the optimization log in the console.
 #     pred = tuner.predict(X_valid)
-#     mae = mean_squared_error(y_valid, pred)
+#     mae = mean_absolute_error(y_valid, pred)
 #     print("Best MAE:", mae)
 #     print(tuner.best_params)
+# -
 
 # ### Parámetros
 
 params = {
-    'learning_rate': 0.05,
-    'num_leaves': 242,
-    'colsample_bytree': 0.8184760893279794,
-    'subsample': 0.5382071904887805,
-    'verbosity': -1,
-    'random_state': 42,
+    'boosting_type': 'gbdt',
     'objective': 'regression',
     'metric': 'l1',
-    'num_threads': 14,
-    'min_sum_hessian_in_leaf': 0.006706207126441575,
-    'reg_alpha': 5.3006159843660915e-08,
-    'reg_lambda': 0.0008648312997620131,
-    'n_estimators': 430,
+    'learning_rate': 0.05,
+    #    'lambda_l1': 0.5,
+    #    'lambda_l2': 0.5,
+    'num_leaves': 100,
+    'feature_fraction': 0.5,
+    'bagging_fraction': 0.5,
+    'bagging_freq': 5,
+    'min_child_samples': 10,
+    'seed': 1003,
 }
 
 
 # ### Validación
+
+df.type.value_counts()
+
+train, test = train_test_split(
+    df[(df.type != 'Test')], test_size=0.3, random_state=1112
+)
+df.loc[test.index, 'type'] = 'Validation'
+
+df.type.value_counts()
+
+# +
+
+model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
+
+
+# -
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -558,35 +602,37 @@ params = {
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">6 | Entrenamiento Modelo</div>
 
 # + id="YgYe0pcOo2Mr"
-# def train_final(df, num_rounds, feat_cols, target_col, params):
-#     """Entrenamiento del modelo final.
+def train_final(df, num_rounds, feat_cols, target_col, params):
+    """Entrenamiento del modelo final.
 
-#     Args:
-#         df (pd.DataFrame): set de datos full
-#         num_rounds (int): numero de iteraciones
-#         feat_cols (list): lista de features del modelo
-#         target_col (str): nombre del target
-#         params (dict): parametros de entrenamiento
+    Args:
+        df (pd.DataFrame): set de datos full
+        num_rounds (int): numero de iteraciones
+        feat_cols (list): lista de features del modelo
+        target_col (str): nombre del target
+        params (dict): parametros de entrenamiento
 
-#     Returns:
-#         Booster: model
-#     """
-#     gbm = lgb.train(params, lgb.Dataset(X_train, y_train), num_boost_round=num_rounds)
-#     return gbm
+    Returns:
+        Booster: model
+    """
+    list_str_obj_cols = df.columns[df.dtypes == "object"].tolist()
+    for str_obj_col in list_str_obj_cols:
+        df[str_obj_col] = df[str_obj_col].astype("category")
+
+    train_filter = df.type.isin(['Train', 'Validation'])
+    X_train, y_train = df.loc[train_filter, feat_cols], df.loc[train_filter, target_col]
+    gbm = lgb.train(params, lgb.Dataset(X_train, y_train), num_boost_round=num_rounds)
+    return gbm
 
 
-# model_final = train_final(df[df.PaymentPrincipal_historical_max.notnull()],
-#                    model.best_iteration,
-#                    model_features,
-#                    target,
-#                    params)
+model_final = train_final(df, model.best_iteration, model_features, target, params)
 
 
 # + [markdown] id="k2Tl_IEdqH3c"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">7 | Inferencia</div>
 
 # + id="_c3jUbxYqKAg"
-def predict(df, feat_cols, model):
+def predict(df, header_cols, feat_cols, target_col, model):
     """Calculo de predicciones.
 
     Args:
@@ -597,17 +643,17 @@ def predict(df, feat_cols, model):
     Returns:
         pd.DataFrame: set de datos con algunas variables del loan y su prediccion final
     """
-    to_infer_filter = True
+    to_infer_filter = df.type == 'Test'
     to_infer = df.loc[to_infer_filter, feat_cols]
 
-    result = df.loc[to_infer_filter, ['']]
-    result['target'] = model.predict(to_infer)
+    result = df.loc[to_infer_filter, header_cols]
+    result[target_col] = model.predict(to_infer)
+
     return result
 
 
-# submission = predict(df, model_features, model_final)
-# assert payments_scoring.shape[0]==submission.shape[0]
-# submission_final = submission.copy()
+submission = predict(df, header_cols, model_features, target, model_final)
+submission.head()
 # -
 
 
@@ -616,21 +662,17 @@ def predict(df, feat_cols, model):
 # ### Guardando solución
 
 # + id="dhcNOaT6rAaA"
-# submission[['PaymentCode', 'PaymentPrincipal']].to_csv(
-#     project_folder + 'submission' + version + '.csv', header=False, index=False
-# )
-# submission_final[['PaymentCode', 'PaymentPrincipal']].to_csv(
-#     project_folder + 'submission_final' + version + '.csv', header=False, index=False
-# )
+submission[['ID_FILA', target]].to_csv(
+    submission_folder + 'submit_' + version + '.csv', index=False, header=False
+)
+
 # -
+
+# > Este modelo dio 0.90538 de score, tercer puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
 
-# De tener mas tiempo hubiera seguido con:
-# - Generar predicciones a través de un [modelo de regressión lineal](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LinearRegression.html)
-# - Generar modelos a partir de mismo algoritmo pero variando los intervalos de tiempo, entrenar con menos meses mas cercanos a la fecha
-# - Probar distintas formas de ensamblarlos
 #
 
 #
