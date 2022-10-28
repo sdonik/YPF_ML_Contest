@@ -62,7 +62,9 @@
 #
 # Una vez detectado y solucionado este error el modelo agregaba algunas variables de la etapa anterior y una variable que sale de obtener una distancia jugando con ángulos y distancias (ver función de variables trigonométricas), esto daba una sutil mejora en validación (1.21) pero empeoraba en el lb (0.94).
 #
+# - Octavo, noveno, décimo submit
 #
+# Sin mejoras, se crearon variables relativas a la etapa (ver función stage_vars), se fixearon bugs en el script respecto de esas variables (problemas con train, validation y test flags), y se probo variable max_delta_last_3, mejora en validacion score (1.08) pero no en lb (0.93113)
 #
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
@@ -93,7 +95,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v7'
+version = 'v10'
 
 
 def read_data():
@@ -113,7 +115,7 @@ def read_data():
     df = pd.concat([train_df, eval_df])
     df = df.reset_index(drop=True)
     df['delta_WHP'] = df['delta_WHP'].astype(float)
-    return train_df, eval_df, df
+    return train_df, eval_df, df.copy()
 
 
 train_df, eval_df, df = read_data()
@@ -409,11 +411,6 @@ baseline2.to_csv(
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
 #
-# -
-
-# reload data
-train_df, eval_df, df = read_data()
-
 
 # + [markdown] id="k9JH73RcZ8Va"
 # ### Feature Enginneering
@@ -422,23 +419,20 @@ train_df, eval_df, df = read_data()
 
 def shifted_vars(df):
     group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+    grouped = df.groupby(group_cols)
     # calc shifted columns per padre-hijo relation
 
-    df['prev_delta'] = df.groupby(group_cols)['delta_WHP'].transform(
-        lambda x: x.shift(1)
+    df['prev_delta'] = grouped['delta_WHP'].transform(lambda x: x.shift(1))
+    df['max_delta_last_3'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=3, min_periods=1).max().shift()
     )
-    df['prev_stage'] = df.groupby(group_cols)['ETAPA_HIJO'].transform(
-        lambda x: x.shift(1)
-    )
-    df['prev_type'] = df.groupby(group_cols)['type'].transform(lambda x: x.shift(1))
-    df['diff_prev_stage'] = df['ETAPA_HIJO'] - df['prev_stage']
 
-    df['next_initial_pressure'] = df.groupby(group_cols)['WHP_i'].transform(
-        lambda x: x.shift(-1)
-    )
-    df['next_stage'] = df.groupby(group_cols)['ETAPA_HIJO'].transform(
-        lambda x: x.shift(-1)
-    )
+    df['prev_stage'] = grouped['ETAPA_HIJO'].transform(lambda x: x.shift(1))
+    # df['prev_type'] = grouped['type'].transform(lambda x: x.shift(1))
+    # df['diff_prev_stage'] = df['ETAPA_HIJO'] - df['prev_stage']
+
+    df['next_initial_pressure'] = grouped['WHP_i'].transform(lambda x: x.shift(-1))
+    df['next_stage'] = grouped['ETAPA_HIJO'].transform(lambda x: x.shift(-1))
     df['diff_next_stage'] = df['next_stage'] - df['ETAPA_HIJO']
     df['estimated_delta'] = round(df['next_initial_pressure'] - df['WHP_i'], 3)
 
@@ -453,8 +447,7 @@ def shifted_vars(df):
     df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
     # if prev delta value is 0, put 0 value
     df.loc[
-        ((df['prev_delta'] == 0.0) | (df['prev_delta'].isna()))
-        & (df.prev_type != 'Test'),
+        (df['prev_delta'].isna()),
         'estimated_delta',
     ] = 0.0
     df.estimated_delta = df.estimated_delta.fillna(0)
@@ -486,6 +479,28 @@ def trigonometric_vars(df):
 
 # trigonometric_vars(df.head(100))[['D3D','DZ','AZ','D2D','AZ_D2D_oposite']]
 
+
+# +
+def stage_vars(df):
+    group_cols = ['HIJO', 'ETAPA_HIJO']
+    grouped = df[df.type == 'Train'].groupby(group_cols)
+    df['n_padres_in_stage'] = grouped['PADRE'].transform(lambda x: x.nunique())
+    # df['max_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.max())
+    # df['min_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.min())
+    df['n_deltas_not_cero_in_stage'] = grouped['delta_WHP'].transform(
+        lambda x: sum(abs(x) > 0)
+    )
+
+    return df
+
+
+# condition = (df.HIJO=='Pozo 461') & (df.ETAPA_HIJO==7)
+# #condition = df.delta_WHP>10
+# #df.sample(10)
+# display(df[condition])
+# stage_vars(df[condition])
+
+
 # -
 
 # A continuacion encontraremos la función principal, su input los files originales, su output el dataset con las variables nuevas a utilizar por el modelo.
@@ -506,6 +521,7 @@ def fe(df):
     )  # ,ascending=[True,True,True,True,True,False])
     df = shifted_vars(df)
     df = trigonometric_vars(df)
+    df = stage_vars(df)
     return df
 
 
@@ -590,9 +606,39 @@ def validate_model(df, target_col, feat_cols, params):
     return gbm, y_pred
 
 
+def lgbm_cross_validation(
+    df,
+    target_col,
+    feat_cols,
+    params,  # n_splits=3, random_state=2221
+):
+
+    list_str_obj_cols = df[feat_cols].columns[df[feat_cols].dtypes == "object"].tolist()
+    for str_obj_col in list_str_obj_cols:
+        df[str_obj_col] = df[str_obj_col].astype("category")
+
+    cats_feats = df[feat_cols].columns[df[feat_cols].dtypes == "category"].values
+    print(f'Categorical columns:{cats_feats}')
+
+    lgb_train = lgb.Dataset(df[feat_cols], label=df[target_col])
+    lgb.cv(params, lgb_train, categorical_feature=list(cats_feats))
+    return None
+
+
 # + [markdown] id="k72M5nnqa4sp"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">5 | Validación Modelo</div>
 #
+# -
+
+# reload data
+train_df, eval_df, df = read_data()
+
+
+train, test = train_test_split(
+    df[(df.type != 'Test')], test_size=0.3, random_state=1112
+)
+df.loc[test.index, 'type'] = 'Validation'
+df = fe(df)
 
 # + [markdown] id="mvZECIc_dHYv"
 # ### Features
@@ -615,13 +661,18 @@ model_features = [
     'WHP_i',
     'ESTADO',
     'prev_delta',
-    'prev_stage',
-    'diff_prev_stage',
+    # 'prev_stage',
+    # 'diff_prev_stage',
+    'max_delta_last_3',
     'next_initial_pressure',
     'next_stage',
     'estimated_delta',
     'diff_next_stage',
     'AZ_D2D_oposite',
+    # 'n_padres_in_stage',
+    # 'max_delta_in_stage',
+    # 'min_delta_in_stage',
+    # 'n_deltas_not_cero_in_stage'
 ]
 target = 'delta_WHP'
 # -
@@ -666,16 +717,17 @@ target = 'delta_WHP'
 params = {
     'boosting_type': 'gbdt',
     'objective': 'regression',
-    'metric': 'l1',
-    'learning_rate': 0.05,
+    'metric': 'mae',
+    'learning_rate': 0.01,
     #    'lambda_l1': 0.5,
     #    'lambda_l2': 0.5,
-    'num_leaves': 100,
-    'feature_fraction': 0.5,
-    'bagging_fraction': 0.5,
+    'num_leaves': 50,
+    'feature_fraction': 0.7,
+    'bagging_fraction': 0.7,
     'bagging_freq': 5,
     'min_child_samples': 10,
     'seed': 1003,
+    'n_estimators': 2000,
 }
 
 
@@ -683,16 +735,14 @@ params = {
 
 df.type.value_counts()
 
-train, test = train_test_split(
-    df[(df.type != 'Test')], test_size=0.3, random_state=1112
-)
-df.loc[test.index, 'type'] = 'Validation'
-
 df.type.value_counts()
 
-df = fe(df)
+# +
+# lgbm_cross_validation(df[(df.type != 'Test')].copy(), target, model_features, params, n_splits=3)
+# -
+
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 1.224836943505242
+# Best MAE: 1.07
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -700,6 +750,12 @@ model, preds = validate_model(df[(df.type != 'Test')], target, model_features, p
 
 # + [markdown] id="6dAirrmtp8aM"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">6 | Entrenamiento Modelo</div>
+# -
+
+
+# reload data
+train_df, eval_df, df = read_data()
+df = fe(df)
 
 
 # + id="YgYe0pcOo2Mr"
@@ -769,7 +825,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.94282 de score, cuarto puesto hasta el momento
+# > Este modelo dio 0.93113 de score, 6 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
