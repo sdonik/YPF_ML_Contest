@@ -22,11 +22,11 @@ repos:
         language: python
         types: [python]
 
-      - id: isort
-        name: isort
-        entry: poetry run isort
-        language: python
-        types: [python]
+      # - id: isort
+      #   name: isort
+      #   entry: poetry run isort
+      #   language: python
+      #   types: [python]
 
       - id: shellcheck
         name: shellcheck

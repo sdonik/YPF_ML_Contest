@@ -36,20 +36,39 @@
 #
 # Para mas detalles sobre los files y la descripción del problema ir a este [link](https://metadata.fundacionsadosky.org.ar/competition/29/)
 
-# # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">2 | Enfoque de la solución</div>
+# # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">2 | Evolución y enfoque final de la solución</div>
 #
-# La variable target tiene,
+# En esta sección describiremos el proceso transitado durante la competencia y las sucesivas marchas y contramarchas dentro de la competencia.
 #
-# Desde un principio, haciendo un leve análisis de los datos y con consultas en el workshop, se detectó que los datasets de train y validación están spliteados al azar sin considerar temporalidad, esto nos dejo abierta la puerta para plantear un modelo baseline tomando el primer delta futuro conocido.
+# - Primer submit
 #
-# El modelo utilizado es [LightGBM](https://lightgbm.readthedocs.io/en/v3.3.2/) que es un algoritmo de gradient boosting muy utilizado para este tipo de problemas.
+# Luego de un análisis exploratorio incial (pandas profiling no agregado a esta notebook + algunos distribuciones de la variable target si agregadas) se probo un baseline con todos los delta en 0 (1.21) para tener un score de referencia
 #
-# A medida que vayamos transitando la notebook la idea es ir detallando un poco mas cada parte del código ejecutado. Se han dejado comentadas parte de las pruebas realizadas sin mejoras.
+# - Segundo submit
+#
+# Teniendo a ese momento como métrica de referencia el MSE y estando en una etapa puramente exploratoria se busco la completitud por medias para los pads con mayor delta que la media del dataset, esto mejoraba el MSE pero empeoró el lb (1.46)
+#
+# - Tercer submit
+#
+# Data leakeage, luego del workshop se aclaró q las etapas tienen un orden cronológico y que la data de evaluación se habia extraído de forma aleatoria, por lo cual se jugo con variables de etapas posteriores para estimar el delta, nuevamente mejoraba el MSE  pero no el lb (1.41), acá se valido que la métrica utilizada en el lb es el MAE y se empezó a utilizar para medir mejoras
+#
+# - Cuarto submit
+#
+# Se utilizó el primer modelo predictivo, se utilizó [LightGBM](https://lightgbm.readthedocs.io/en/v3.3.1/) que es un algoritmo de gradient boosting muy popular para este tipo de problemas. Sin ningun tipo de feature enginnering (de ahora en mas fe) adicional al que ya se tenía, spliteando 80/20 para tener un set de validación, y luego entrenando con la totalidad de la data y el número de iteraciones obtenida contra esa validación. Ahí ya utilizando MAE en validación daba 1.22 y en el lb se consiguió un puntaje de 0.90 obteniendo mejora significativa
+#
+# - Quinto, sexto y séptimo submit
+#
+# Se empezaron a crear funciones de fe, y esto trajo errores en el script. La función inicialmente no tenia el sort indicado sobre los registros para que el cálculo de las variables shifted diera de forma correcta por lo cual se obtuvieron dos submits fallidos.
+#
+# Una vez detectado y solucionado este error el modelo agregaba algunas variables de la etapa anterior y una variable que sale de obtener una distancia jugando con ángulos y distancias (ver función de variables trigonométricas), esto daba una sutil mejora en validación (1.21) pero empeoraba en el lb (0.94).
+#
 #
 #
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
+
+import math
 
 # + id="NjKshGeHZXPt"
 from sys import displayhook
@@ -74,24 +93,30 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v0.1'
+version = 'v7'
 
-train_df = pd.read_csv(
-    data_folder + 'Dataset participantes.csv',
-    encoding='utf-16le',
-    sep='\t',
-    decimal='.',
-)
-train_df['type'] = 'Train'
-eval_df = pd.read_csv(data_folder + 'Dataset evaluación.csv')
-eval_df['type'] = 'Test'
-eval_df['delta_WHP'] = None
-eval_df['WHP_i'] = eval_df['WHP_i'].replace(',', '.', regex=True).astype(float)
-eval_df['D3D'] = eval_df['D3D'].replace(',', '.', regex=True).astype(float)
 
-df = pd.concat([train_df, eval_df])
-df = df.reset_index(drop=True)
-df['delta_WHP'] = df['delta_WHP'].astype(float)
+def read_data():
+    train_df = pd.read_csv(
+        data_folder + 'Dataset participantes.csv',
+        encoding='utf-16le',
+        sep='\t',
+        decimal='.',
+    )
+    train_df['type'] = 'Train'
+    eval_df = pd.read_csv(data_folder + 'Dataset evaluación.csv')
+    eval_df['type'] = 'Test'
+    eval_df['delta_WHP'] = None
+    eval_df['WHP_i'] = eval_df['WHP_i'].replace(',', '.', regex=True).astype(float)
+    eval_df['D3D'] = eval_df['D3D'].replace(',', '.', regex=True).astype(float)
+
+    df = pd.concat([train_df, eval_df])
+    df = df.reset_index(drop=True)
+    df['delta_WHP'] = df['delta_WHP'].astype(float)
+    return train_df, eval_df, df
+
+
+train_df, eval_df, df = read_data()
 
 # -
 
@@ -379,15 +404,88 @@ baseline2.to_csv(
     submission_folder + 'baseline_estimated.csv', index=False, header=False
 )
 
-
 # > El score de este submit da 1.4157 no estaríamos mejorando (hasta este momento solo estaba revisando contra MSE, de aquí en mas ya mi métrica será MAE)
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
 #
+# -
+
+# reload data
+train_df, eval_df, df = read_data()
+
 
 # + [markdown] id="k9JH73RcZ8Va"
 # ### Feature Enginneering
+# -
+
+
+def shifted_vars(df):
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+    # calc shifted columns per padre-hijo relation
+
+    df['prev_delta'] = df.groupby(group_cols)['delta_WHP'].transform(
+        lambda x: x.shift(1)
+    )
+    df['prev_stage'] = df.groupby(group_cols)['ETAPA_HIJO'].transform(
+        lambda x: x.shift(1)
+    )
+    df['prev_type'] = df.groupby(group_cols)['type'].transform(lambda x: x.shift(1))
+    df['diff_prev_stage'] = df['ETAPA_HIJO'] - df['prev_stage']
+
+    df['next_initial_pressure'] = df.groupby(group_cols)['WHP_i'].transform(
+        lambda x: x.shift(-1)
+    )
+    df['next_stage'] = df.groupby(group_cols)['ETAPA_HIJO'].transform(
+        lambda x: x.shift(-1)
+    )
+    df['diff_next_stage'] = df['next_stage'] - df['ETAPA_HIJO']
+    df['estimated_delta'] = round(df['next_initial_pressure'] - df['WHP_i'], 3)
+
+    # if there is more than one stage between rows put delta 0
+    df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = 0.0
+    # if delta is lower than 1 consider as noise
+    df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
+    # if delta is bigger than common delta values put fence value
+    upper_fence = 13.3
+    lower_fence = 0
+    df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
+    df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
+    # if prev delta value is 0, put 0 value
+    df.loc[
+        ((df['prev_delta'] == 0.0) | (df['prev_delta'].isna()))
+        & (df.prev_type != 'Test'),
+        'estimated_delta',
+    ] = 0.0
+    df.estimated_delta = df.estimated_delta.fillna(0)
+
+    return df
+
+
+# +
+def trigonometric_vars(df):
+    # equivalent to D2D
+    # df['DZ_D3D_pithagoras'] = (df['D3D'].pow(2) - df['DZ'].pow(2)).pow(0.5)
+
+    df.loc[df.AZ == 0, 'AZ_D2D_oposite'] = 0
+    df.loc[df.AZ > 0, 'AZ_D2D_oposite'] = df.D2D * df.AZ.apply(
+        lambda x: math.sin(math.radians(x))
+    )
+    df.loc[df.AZ > 90, 'AZ_D2D_oposite'] = df.D2D * df.AZ.apply(
+        lambda x: math.sin(math.radians(180 - x))
+    )
+    df.loc[df.AZ > 180, 'AZ_D2D_oposite'] = df.D2D * df.AZ.apply(
+        lambda x: math.sin(math.radians(x - 180))
+    )
+    df.loc[df.AZ > 270, 'AZ_D2D_oposite'] = df.D2D * df.AZ.apply(
+        lambda x: math.sin(math.radians(360 - x))
+    )
+
+    return df
+
+
+# trigonometric_vars(df.head(100))[['D3D','DZ','AZ','D2D','AZ_D2D_oposite']]
+
 # -
 
 # A continuacion encontraremos la función principal, su input los files originales, su output el dataset con las variables nuevas a utilizar por el modelo.
@@ -403,7 +501,11 @@ def fe(df):
     Returns:
         pd.DataFrame: set de datos final
     """
-
+    df = df.sort_values(
+        by=['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO']
+    )  # ,ascending=[True,True,True,True,True,False])
+    df = shifted_vars(df)
+    df = trigonometric_vars(df)
     return df
 
 
@@ -496,7 +598,7 @@ def validate_model(df, target_col, feat_cols, params):
 # ### Features
 
 # + id="KhHfwjnkdQQK"
-header_cols = ['ID_FILA', 'ID_EVENTO', 'type', 'prev_type']
+header_cols = ['ID_FILA', 'ID_EVENTO', 'type']
 model_features = [
     'CAMPO',
     'FLUIDO',
@@ -512,13 +614,14 @@ model_features = [
     'LINEAMIENTO',
     'WHP_i',
     'ESTADO',
-    'type',
+    'prev_delta',
+    'prev_stage',
+    'diff_prev_stage',
     'next_initial_pressure',
     'next_stage',
-    'prev_delta',
-    'prev_type',
     'estimated_delta',
-    'diff_stages',
+    'diff_next_stage',
+    'AZ_D2D_oposite',
 ]
 target = 'delta_WHP'
 # -
@@ -587,12 +690,9 @@ df.loc[test.index, 'type'] = 'Validation'
 
 df.type.value_counts()
 
-# +
-
+df = fe(df)
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-
-
-# -
+# Best MAE: 1.224836943505242
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -600,6 +700,7 @@ model, preds = validate_model(df[(df.type != 'Test')], target, model_features, p
 
 # + [markdown] id="6dAirrmtp8aM"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">6 | Entrenamiento Modelo</div>
+
 
 # + id="YgYe0pcOo2Mr"
 def train_final(df, num_rounds, feat_cols, target_col, params):
@@ -668,11 +769,9 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.90538 de score, tercer puesto hasta el momento
+# > Este modelo dio 0.94282 de score, cuarto puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
-#
-
 #
 
 #
