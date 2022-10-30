@@ -40,31 +40,46 @@
 #
 # En esta sección describiremos el proceso transitado durante la competencia y las sucesivas marchas y contramarchas dentro de la competencia.
 #
-# - Primer submit
+# - Submit 1:
 #
 # Luego de un análisis exploratorio incial (pandas profiling no agregado a esta notebook + algunos distribuciones de la variable target si agregadas) se probo un baseline con todos los delta en 0 (1.21) para tener un score de referencia
 #
-# - Segundo submit
+# - Submit 2
 #
 # Teniendo a ese momento como métrica de referencia el MSE y estando en una etapa puramente exploratoria se busco la completitud por medias para los pads con mayor delta que la media del dataset, esto mejoraba el MSE pero empeoró el lb (1.46)
 #
-# - Tercer submit
+# - Submit 3
 #
 # Data leakeage, luego del workshop se aclaró q las etapas tienen un orden cronológico y que la data de evaluación se habia extraído de forma aleatoria, por lo cual se jugo con variables de etapas posteriores para estimar el delta, nuevamente mejoraba el MSE  pero no el lb (1.41), acá se valido que la métrica utilizada en el lb es el MAE y se empezó a utilizar para medir mejoras
 #
-# - Cuarto submit
+# - Submit 4
 #
 # Se utilizó el primer modelo predictivo, se utilizó [LightGBM](https://lightgbm.readthedocs.io/en/v3.3.1/) que es un algoritmo de gradient boosting muy popular para este tipo de problemas. Sin ningun tipo de feature enginnering (de ahora en mas fe) adicional al que ya se tenía, spliteando 80/20 para tener un set de validación, y luego entrenando con la totalidad de la data y el número de iteraciones obtenida contra esa validación. Ahí ya utilizando MAE en validación daba 1.22 y en el lb se consiguió un puntaje de 0.90 obteniendo mejora significativa
 #
-# - Quinto, sexto y séptimo submit
+# - Submits 5,6,7
 #
 # Se empezaron a crear funciones de fe, y esto trajo errores en el script. La función inicialmente no tenia el sort indicado sobre los registros para que el cálculo de las variables shifted diera de forma correcta por lo cual se obtuvieron dos submits fallidos.
 #
 # Una vez detectado y solucionado este error el modelo agregaba algunas variables de la etapa anterior y una variable que sale de obtener una distancia jugando con ángulos y distancias (ver función de variables trigonométricas), esto daba una sutil mejora en validación (1.21) pero empeoraba en el lb (0.94).
 #
-# - Octavo, noveno, décimo submit
+# - Submits 8,9,10
 #
 # Sin mejoras, se crearon variables relativas a la etapa (ver función stage_vars), se fixearon bugs en el script respecto de esas variables (problemas con train, validation y test flags), y se probo variable max_delta_last_3, mejora en validacion score (1.08) pero no en lb (0.93113)
+#
+# - Submit 11
+#
+# Jugando con variable ID_FILA, pensando erróneamente que podía aportar info del orden de los sucesos, empeoraba en validación (1.30) y tambien en lb (1.14).
+#
+# Mucho tiempo dedicado a tratar de reconstruir la linea temporal de un pozo padre (ordenar las interacciones de los pozos hijos) sin éxito.
+#
+# - Submit 12
+#
+# Abandonada la idea de rearmar el flujo de alteraciones se generan variables futuras que son de peso para la mejora como:
+#     'max_delta_next_6',
+#     'mean_delta_next_6',
+#     'next_pressure_relation',
+#
+# Dando en validation 0.8264 y en lb 0.86 (septimo hasta el momento)
 #
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
@@ -95,7 +110,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v10'
+version = 'v12'
 
 
 def read_data():
@@ -191,6 +206,8 @@ df.groupby(['CAMPO', 'FLUIDO']).agg(
     {'PADRE': 'nunique', 'HIJO': 'nunique', 'type': ['min', 'max']}
 )
 
+df.groupby('PADRE').size().sort_values().tail()
+
 # > Cada campo tiene destinado un sólo tipo de fluido
 
 # > En todos los campos tengo data a inferir
@@ -254,9 +271,11 @@ aux = df.groupby('PADRE').HIJO.nunique().sort_values(ascending=False)
 displayhook(aux.describe())
 px.box(aux, width=400, height=400, title="n hijos por padre")
 
+# > Tengo una mediana de 6 hijos interfiriendo un padre y el 50% de la distribución esta entre 3 y 10 hijos
+
 # ### Data Leakeage
 
-# Los eventos tienen un orden temporal, si bien en este dataset no fechas, tenemos las etapas de perforación de cada pozo, que si marcan un orden.
+# Los eventos tienen un orden temporal, si bien en este dataset no hay fechas, tenemos las etapas de perforación de cada pozo, que si marcan un orden.
 #
 # Por otro lado sabemos que la data de evalución se armó aleatoriamente, es decir sin tener en cuenta las etapas, por lo cual podríamos tener data futura de como esta el pozo de relevancia para la competencia (obviamente esta data no se podría usar en un modelo productivo).
 #
@@ -265,6 +284,7 @@ px.box(aux, width=400, height=400, title="n hijos por padre")
 df.loc[
     df.CAMPO == 'Campo D',
     [
+        'ID_FILA',
         'FLUIDO',
         'CAMPO',
         'PAD_HIJO',
@@ -277,7 +297,7 @@ df.loc[
     ],
 ].head(10)
 
-# > Se observa que los casos a predecir estan de forma aleatoria entre las etapas
+# > Se observa que los casos a predecir estan de forma aleatoria entre las etapas, pero también vemos que en los casos de train, la variable ID_FILA pareciera identificar el orden de los casos
 
 group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
 # calc shifted columns per padre-hijo relation
@@ -331,34 +351,7 @@ print(
 
 # -
 
-# Veamos el MAE por pozo padre para los peores casos
-
-aux = (
-    df[(df.type == 'Train')]
-    .groupby(['CAMPO', 'PAD_HIJO', 'PADRE'])
-    .apply(lambda x: mean_absolute_error(x['delta_WHP'], x['estimated_delta']))
-)
-aux[aux > 1.44]
-
-pozo_padre = 'Pozo 5'
-df.loc[
-    (df.PADRE == pozo_padre),
-    [
-        'CAMPO',
-        'PAD_HIJO',
-        'PADRE',
-        'HIJO',
-        'ETAPA_HIJO',
-        'type',
-        'WHP_i',
-        'next_initial_pressure',
-        'delta_WHP',
-        'estimated_delta',
-        'diff_stages',
-        'prev_delta',
-    ],
-]
-
+pozo_padre = 'Pozo 212'
 aux = df.loc[
     df.PADRE == pozo_padre,
     [
@@ -382,8 +375,8 @@ fig = px.line(
     y="WHP_i",
     color='HIJO',
     hover_data=['type', 'delta_WHP', 'estimated_delta', 'diff_stages'],
-    width=800,
-    height=300,
+    # width=800,
+    # height=300,
     title="Presión inicial por etapa",
 )
 fig.show()
@@ -406,7 +399,159 @@ baseline2.to_csv(
     submission_folder + 'baseline_estimated.csv', index=False, header=False
 )
 
+
 # > El score de este submit da 1.4157 no estaríamos mejorando (hasta este momento solo estaba revisando contra MSE, de aquí en mas ya mi métrica será MAE)
+
+# ### Análisis ID_FILA
+
+# Como mencionabamos anteriormente, esta variable parece marcar un orden temporal, esto nos permitiria ordenar los eventos no solo en un pozo hijo (ya lo lograbamos con la etapa) sino tambien entre pozos que afecten un mismo padre
+
+
+def chart_evolution(
+    df,
+    x='ID_FILA',
+    y='WHP_i',
+    color='HIJO',
+    title='presion inicial por ID fila',
+    father_name=None,
+):
+    if father_name is None:
+        aux = df.sort_values(by=x)
+        title = "Evolución " + title
+    else:
+        aux = df[(df.PADRE == father_name)].sort_values(by=x)
+        title = "Evolución " + title + " del pozo padre: " + father_name
+    fig = px.scatter(
+        aux,
+        x=x,
+        y=y,
+        color=color,
+        hover_data=[
+            'type',
+            'delta_WHP',
+            'estimated_delta',
+            'CAMPO',
+            'HIJO',
+            'ETAPA_HIJO',
+        ],
+        # width=800,
+        # height=300,
+        title=title,
+    )
+    fig.show()
+
+
+chart_evolution(df, color='CAMPO')
+
+# > Evidentemente el set de train se ordeno por presión inicial en varios tramos pero esto no tiene nada que ver con el orden de los eventos, en un principio parecia ya que la presión inicial de los pozos suele incrementarse
+
+# ### Evolución presión
+
+title = 'presión inicial'
+chart_evolution(
+    df, x='ETAPA_HIJO', father_name='Pozo 169', title='presión inicial por etapa'
+)
+# chart_evolution(df, x='id_row', father_name='Pozo 169', title='presión inicial por nuevo orden')
+chart_evolution(
+    df, x='ETAPA_HIJO', father_name='Pozo 212', title='presión inicial por etapa'
+)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 212', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 5', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 382', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 91', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 28', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 175', title=title)
+
+
+# A continuación intentaremos generar una variable similar a ID_FILA pero que contemple los casos de evaluación
+
+# +
+# sin resultados
+def smart_sort(df):
+    fathers = [
+        'Pozo 212'
+    ]  # ,'Pozo 212','Pozo 91','Pozo 5','Pozo 382','Pozo 28','Pozo 175']
+    df['PADRE_int'] = df.PADRE.str[5:].astype(int)
+    df['HIJO_int'] = df.HIJO.str[5:].astype(int)
+    df = df[df.PADRE.isin(fathers)].sort_values(
+        ['FLUIDO', 'CAMPO', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
+    )
+    # df = df.sort_values(['FLUIDO','CAMPO','PADRE_int','HIJO_int','ETAPA_HIJO'])
+
+    df['HIJO_group'] = df.HIJO_int.floordiv(10)
+    # df = df.sort_values(['FLUIDO','CAMPO','PADRE_int','HIJO_group','ETAPA_HIJO'])
+    df = df.drop(['id_row'], axis=1, errors='ignore')
+    df.index.name = 'id_row'
+    df = df.reset_index()
+
+    # for father in list(aux.PADRE.unique()):
+    #     print(father)
+    #     n_sons = 1
+    #     for son in list(aux.HIJO.unique()):
+    #         print(son)
+    #         if (n_sons == 1):
+    #             result = pd.concat([result,aux[(aux.PADRE==father) & (aux.HIJO==son)]])
+    #         else:
+    #             for r in result.iterrows:
+    #                 for s in aux[(aux.PADRE==father) & (aux.HIJO==son)]
+    #         n_sons = n_sons + 1
+    # display(result)
+    # print(result.shape)
+    return df
+
+
+# df = smart_sort(df)
+
+
+def estimation_by_id_row(df):
+    df['id_row'] = df[df.type == 'Train'].ID_FILA
+    group_cols = ['FLUIDO', 'CAMPO', 'PADRE']
+    df = df.sort_values(by=group_cols + ['WHP_i'])
+    grouped = df.groupby(group_cols)
+    # df['id_row'] = df['id_row'].isna().cumsum() + df['days_unseen'].ffill()
+    df['id_row'] = grouped['id_row'].transform(lambda x: x.interpolate())
+
+    df = df.sort_values(by='id_row')
+    grouped = df.groupby(group_cols)
+    # calc shifted columns per padre-hijo relation
+    df['next_initial_pressure'] = grouped['WHP_i'].transform(lambda x: x.shift(-1))
+    df['prev_delta'] = grouped['delta_WHP'].transform(lambda x: x.shift(1))
+    df['next_row'] = grouped['id_row'].transform(lambda x: x.shift(-1))
+
+    df['max_delta_last_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=6, min_periods=1).max().shift()
+    )
+    df['mean_delta_last_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=6, min_periods=1).mean().shift()
+    )
+
+    df['prev_type'] = grouped['type'].transform(lambda x: x.shift(1))
+    df['estimated_delta'] = round(df['next_initial_pressure'] - df['WHP_i'], 3)
+    df['diff_next_row'] = df['next_row'] - df['id_row']
+
+    # df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
+    # # if delta is bigger than common delta values put fence value
+    # upper_fence = 13.3
+    # lower_fence = 0
+    # df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
+    # df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
+    # if last delta values are 0, put 0 value
+    df.loc[
+        (df['prev_delta'] == 0.0),
+        'estimated_delta',
+    ] = 0.0
+    # df.estimated_delta = df.estimated_delta.fillna(0)
+    return df
+
+
+df = estimation_by_id_row(df)
+# display(df.loc[(df.PADRE=='Pozo 212'),['id_row','HIJO','ETAPA_HIJO','WHP_i','delta_WHP','estimated_delta','type','next_initial_pressure','prev_delta','mean_delta_last_6','max_delta_last_6']])
+chart_evolution(df, father_name='Pozo 169', x='id_row', color='type')
+chart_evolution(df, father_name='Pozo 212', x='id_row', color='type')
+chart_evolution(df, father_name='Pozo 5', x='id_row', color='type')
+chart_evolution(df, father_name='Pozo 382', x='id_row', color='type')
+chart_evolution(df, father_name='Pozo 91', x='id_row', color='type')
+
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
@@ -419,10 +564,13 @@ baseline2.to_csv(
 
 def shifted_vars(df):
     group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+    df = df.sort_values(by=group_cols)
     grouped = df.groupby(group_cols)
     # calc shifted columns per padre-hijo relation
 
     df['prev_delta'] = grouped['delta_WHP'].transform(lambda x: x.shift(1))
+    df['prev_init_pressure'] = grouped['WHP_i'].transform(lambda x: x.shift(1))
+
     df['max_delta_last_3'] = grouped['delta_WHP'].transform(
         lambda x: x.rolling(window=3, min_periods=1).max().shift()
     )
@@ -435,6 +583,23 @@ def shifted_vars(df):
     df['next_stage'] = grouped['ETAPA_HIJO'].transform(lambda x: x.shift(-1))
     df['diff_next_stage'] = df['next_stage'] - df['ETAPA_HIJO']
     df['estimated_delta'] = round(df['next_initial_pressure'] - df['WHP_i'], 3)
+
+    df['max_delta_last_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=6, min_periods=1).max().shift()
+    )
+    df['mean_delta_last_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=6, min_periods=1).mean().shift()
+    )
+
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=6)
+    df['max_delta_next_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=indexer, min_periods=1).max().shift()
+    )
+    df['mean_delta_next_6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=indexer, min_periods=1).mean().shift()
+    )
+    df['prev_pressure_relation'] = df['WHP_i'] / df['prev_init_pressure']
+    df['next_pressure_relation'] = df['next_initial_pressure'] / df['WHP_i']
 
     # if there is more than one stage between rows put delta 0
     df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = 0.0
@@ -503,6 +668,22 @@ def stage_vars(df):
 
 # -
 
+
+def dad_vars(df):
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE']
+    df = df.sort_values(by=group_cols + ['WHP_i'])
+    grouped = df.groupby(group_cols)
+
+    df['n_padres_in_stage'] = grouped['PADRE'].transform(lambda x: x.nunique())
+    # df['max_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.max())
+    # df['min_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.min())
+    df['n_deltas_not_cero_in_stage'] = grouped['delta_WHP'].transform(
+        lambda x: sum(abs(x) > 0)
+    )
+
+    return df
+
+
 # A continuacion encontraremos la función principal, su input los files originales, su output el dataset con las variables nuevas a utilizar por el modelo.
 
 # + id="SIUsK0D5aDOn"
@@ -519,6 +700,11 @@ def fe(df):
     df = df.sort_values(
         by=['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO']
     )  # ,ascending=[True,True,True,True,True,False])
+
+    df['PADRE_int'] = df.PADRE.str[5:].astype(int)
+    df['HIJO_int'] = df.HIJO.str[5:].astype(int)
+    df['HIJO_group'] = df.HIJO_int.floordiv(10)
+
     df = shifted_vars(df)
     df = trigonometric_vars(df)
     df = stage_vars(df)
@@ -661,14 +847,20 @@ model_features = [
     'WHP_i',
     'ESTADO',
     'prev_delta',
+    'HIJO_int',
+    'PADRE_int',
     # 'prev_stage',
     # 'diff_prev_stage',
-    'max_delta_last_3',
-    'next_initial_pressure',
-    'next_stage',
-    'estimated_delta',
-    'diff_next_stage',
+    'max_delta_last_6',
+    'mean_delta_last_6',
+    'prev_pressure_relation',
     'AZ_D2D_oposite',
+    'max_delta_next_6',
+    'mean_delta_next_6',
+    'next_pressure_relation',
+    'estimated_delta',
+    # 'id_row',
+    # 'diff_next_row',
     # 'n_padres_in_stage',
     # 'max_delta_in_stage',
     # 'min_delta_in_stage',
@@ -721,11 +913,11 @@ params = {
     'learning_rate': 0.01,
     #    'lambda_l1': 0.5,
     #    'lambda_l2': 0.5,
-    'num_leaves': 50,
+    'num_leaves': 100,
     'feature_fraction': 0.7,
     'bagging_fraction': 0.7,
     'bagging_freq': 5,
-    'min_child_samples': 10,
+    'min_child_samples': 30,
     'seed': 1003,
     'n_estimators': 2000,
 }
@@ -825,7 +1017,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.93113 de score, 6 puesto hasta el momento
+# > Este modelo dio 0.86129 de score, 7 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
