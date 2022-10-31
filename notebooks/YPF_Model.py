@@ -81,6 +81,9 @@
 #
 # Dando en validation 0.8264 y en lb 0.86 (septimo hasta el momento)
 #
+# - Submit 13
+#
+# Con el análisis de scores con mayor error identificamos que la variable estimated_delta funciona mejor sin el setup adicional que se le estaba poniendo (setear en 0 para algunos casos particulares), ya que estos son incorporados a traves del modelo por otras variables y esas diferencias aportaban informacion. Se logro un score de validacion de 0.79 y en lb 0.83 (sexto hasta el momento)
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -96,6 +99,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import seaborn as sns
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
 
@@ -110,7 +114,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v12'
+version = 'v13'
 
 
 def read_data():
@@ -551,7 +555,10 @@ chart_evolution(df, father_name='Pozo 212', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 5', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 382', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 91', x='id_row', color='type')
+# -
 
+
+df[df.AZ > 350].head()
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
@@ -602,20 +609,20 @@ def shifted_vars(df):
     df['next_pressure_relation'] = df['next_initial_pressure'] / df['WHP_i']
 
     # if there is more than one stage between rows put delta 0
-    df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = 0.0
-    # if delta is lower than 1 consider as noise
-    df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
-    # if delta is bigger than common delta values put fence value
-    upper_fence = 13.3
-    lower_fence = 0
-    df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
-    df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
-    # if prev delta value is 0, put 0 value
-    df.loc[
-        (df['prev_delta'].isna()),
-        'estimated_delta',
-    ] = 0.0
-    df.estimated_delta = df.estimated_delta.fillna(0)
+    df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = None
+    # # if delta is lower than 1 consider as noise
+    # df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
+    # # if delta is bigger than common delta values put fence value
+    # upper_fence = 13.3
+    # lower_fence = 0
+    # df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
+    # df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
+    # # if prev delta value is 0, put 0 value
+    # df.loc[
+    #     (df['prev_delta'].isna()),
+    #     'estimated_delta',
+    # ] = 0.0
+    # df.estimated_delta = df.estimated_delta.fillna(0)
 
     return df
 
@@ -684,6 +691,40 @@ def dad_vars(df):
     return df
 
 
+# +
+from sklearn.preprocessing import PolynomialFeatures
+
+
+def linear_regressor_model(df):
+    pf = PolynomialFeatures(degree=4)
+    X = pf.fit_transform(df[['ETAPA_HIJO']].values.reshape(-1, 1))
+    y = df[['WHP_i']].values
+    to_pred = pf.fit_transform(df[['ETAPA_HIJO_plus_1']].values.reshape(-1, 1))
+
+    return np.squeeze(LinearRegression().fit(X, y).predict(to_pred))
+
+
+def linear_regressor(df):
+
+    df['ETAPA_HIJO_plus_1'] = df['ETAPA_HIJO'] + 1
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+    df = df.sort_values(by=group_cols)
+    grouped = df.groupby(group_cols)
+    result = grouped.apply(linear_regressor_model)
+    print(result)
+    result = result.rename('linear_preds')
+    result = result.explode('linear_preds')
+    df['linear_predictions'] = result.values
+    df['estimated_delta_prediction'] = df['linear_predictions'] - df['WHP_i']
+
+    return df
+
+
+# print(linear_regressor(df[(df.HIJO=='Pozo 400') & (df.PADRE=='Pozo 212')])[['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO','ETAPA_HIJO','ETAPA_HIJO_plus_1','delta_WHP','estimated_delta','estimated_delta_prediction','WHP_i','linear_predictions']])
+
+
+# -
+
 # A continuacion encontraremos la función principal, su input los files originales, su output el dataset con las variables nuevas a utilizar por el modelo.
 
 # + id="SIUsK0D5aDOn"
@@ -704,6 +745,7 @@ def fe(df):
     df['PADRE_int'] = df.PADRE.str[5:].astype(int)
     df['HIJO_int'] = df.HIJO.str[5:].astype(int)
     df['HIJO_group'] = df.HIJO_int.floordiv(10)
+    df['PAD_HIJO_int'] = df.PAD_HIJO.str[4:].astype(int)
 
     df = shifted_vars(df)
     df = trigonometric_vars(df)
@@ -849,6 +891,7 @@ model_features = [
     'prev_delta',
     'HIJO_int',
     'PADRE_int',
+    'PAD_HIJO_int',
     # 'prev_stage',
     # 'diff_prev_stage',
     'max_delta_last_6',
@@ -934,9 +977,22 @@ df.type.value_counts()
 # -
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 1.07
+# Best MAE: 0.7941
 
 # ### Análisis mayores diferencias respecto del target
+
+header_cols
+
+aux = df[df.type == 'Validation'].reset_index(drop=True)
+aux['preds'] = pd.Series(preds, name='preds')
+aux = aux[header_cols + [target] + ['preds']]
+mae = mean_absolute_error(aux[target], aux['preds'])
+print("MAE original:", mae)
+
+aux['diffReal'] = (aux[target] - aux.preds).abs()
+aux.sort_values(by='diffReal', ascending=False).head(10)
+
+df[(df.PADRE_int == 324) & (df.HIJO_int == 531)]
 
 # ### Mejoras predicciones en función de resultados
 
@@ -1017,7 +1073,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.86129 de score, 7 puesto hasta el momento
+# > Este modelo dio 0.83453 de score, 6 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
