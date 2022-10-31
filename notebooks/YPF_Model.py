@@ -84,6 +84,10 @@
 # - Submit 13
 #
 # Con el análisis de scores con mayor error identificamos que la variable estimated_delta funciona mejor sin el setup adicional que se le estaba poniendo (setear en 0 para algunos casos particulares), ya que estos son incorporados a traves del modelo por otras variables y esas diferencias aportaban informacion. Se logro un score de validacion de 0.79 y en lb 0.83 (sexto hasta el momento)
+#
+# - Submit 14
+#
+# Funcion 'get_dad_vars' con variables asociadas al pozo padre, es decir tomamos todas las interacciones para ese pozo, las ordenamos por presion inicial ascendente (esto deja de tomar a la etapa como factor de orden) y calcula métricas como el max, mean y mediana de esos deltas
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -114,7 +118,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v13'
+version = 'v14'
 
 
 def read_data():
@@ -465,6 +469,10 @@ chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 382', title=title)
 chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 91', title=title)
 chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 28', title=title)
 chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 175', title=title)
+chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 324', title=title)
+chart_evolution(
+    df, x='ETAPA_HIJO', y='delta_WHP', father_name='Pozo 324', title='delta de presion'
+)
 
 
 # A continuación intentaremos generar una variable similar a ID_FILA pero que contemple los casos de evaluación
@@ -610,6 +618,8 @@ def shifted_vars(df):
 
     # if there is more than one stage between rows put delta 0
     df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = None
+
+    # Better score removing this lines
     # # if delta is lower than 1 consider as noise
     # df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
     # # if delta is bigger than common delta values put fence value
@@ -623,6 +633,96 @@ def shifted_vars(df):
     #     'estimated_delta',
     # ] = 0.0
     # df.estimated_delta = df.estimated_delta.fillna(0)
+
+    df['estimated_delta_diff'] = df['delta_WHP'] - df['estimated_delta']
+
+    return df
+
+
+def get_agg_from_train(
+    df, col_to_aggregate=None, var_to_aggregate='delta_WHP', function='mean'
+):
+    """Aplica funcion a la data de train. Por defecto devuelve promedios.
+    Args:
+        df (pd.DataFrame): set de datos con las columnas mencionadas
+        col_to_aggregate (list, optional): lista de columnas a agrupar. Defaults to None.
+        var_to_aggregate (str, optional): columna a calcular el promedio. Defaults to 'delta_WHP'.
+
+    Returns:
+        pd.Series: una columna con el nombre var_to_aggregate+'_'+function
+    """
+    if col_to_aggregate is None:
+        to_group = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+        col_to_aggregate = ''
+    else:
+        to_group = col_to_aggregate
+    aux = (
+        df[df['type'] == 'Train']
+        .groupby(to_group)[var_to_aggregate]
+        .agg({('custom', function), ('n', 'count')})
+        .reset_index()
+    )
+    aux.loc[aux['n'] < 10, 'avg'] = None
+    aux.drop(columns=['n'], inplace=True)
+    aux.rename(columns={"custom": var_to_aggregate + '_' + function}, inplace=True)
+    return aux
+
+
+def get_dad_vars(df, vars_dict, rolling_window=100):
+    """Genera variables del padre segun su historico de eventos ordenados por presion ascendente. Si no se indica una ventana de tiempo se generan variables
+    históricas de comportamiento, de lo contrario se observan rolling_window filas hacia atras.
+
+    Args:
+        df (pd.DataFrame): set de datos
+        vars_dict (dict): diccionario con variables y agregaciones a aplicar
+        rolling_window (int, optional): indica la cantidad de filas a considerar para el calculo. Defaults to 100.
+
+    Returns:
+        pd.DataFrame: devuelve el set de datos con las nuevas columnas agregadas
+    """
+    if rolling_window == 100:
+        rolling_name = '_historical_'
+    else:
+        rolling_name = '_rolling' + str(rolling_window) + '_'
+
+    group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE']
+    df = df.sort_values(by=group_vars + ['WHP_i'])
+    grouped = df.groupby(group_vars)
+    for i in vars_dict:
+        print("Calculating " + i + " aggregations..")
+        for j in vars_dict[i]:
+            var_name = i + rolling_name + j
+            print('\t' + var_name)
+            if j == 'max':
+                df[var_name] = grouped[i].transform(
+                    lambda x: x.rolling(window=rolling_window, min_periods=1)
+                    .max()
+                    .shift()
+                )
+            elif j == 'mean':
+                df[var_name] = grouped[i].transform(
+                    lambda x: x.rolling(window=rolling_window, min_periods=1)
+                    .mean()
+                    .shift()
+                )
+            elif j == 'min':
+                df[var_name] = grouped[i].transform(
+                    lambda x: x.rolling(window=rolling_window, min_periods=1)
+                    .min()
+                    .shift()
+                )
+            elif j == 'count':
+                df[var_name] = grouped[i].transform(
+                    lambda x: x.rolling(window=rolling_window, min_periods=1)
+                    .count()
+                    .shift()
+                )
+            elif j == 'median':
+                df[var_name] = grouped[i].transform(
+                    lambda x: x.rolling(window=rolling_window, min_periods=1)
+                    .median()
+                    .shift()
+                )
 
     return df
 
@@ -750,6 +850,22 @@ def fe(df):
     df = shifted_vars(df)
     df = trigonometric_vars(df)
     df = stage_vars(df)
+    df = df.merge(get_agg_from_train(df), how='left')
+    df = df.merge(get_agg_from_train(df, function='median'), how='left')
+
+    historical_agg = {
+        'delta_WHP': ['max', 'mean', 'median'],
+    }
+    df = get_dad_vars(df, historical_agg)
+
+    last_months_agg = {
+        'delta_WHP': ['max', 'mean', 'median'],
+    }
+
+    # variables from rolling6
+    df = get_dad_vars(df, last_months_agg, rolling_window=6)
+    # variables from rolling3
+    df = get_dad_vars(df, last_months_agg, rolling_window=3)
     return df
 
 
@@ -870,6 +986,9 @@ df = fe(df)
 
 # + [markdown] id="mvZECIc_dHYv"
 # ### Features
+# -
+
+df.columns
 
 # + id="KhHfwjnkdQQK"
 header_cols = ['ID_FILA', 'ID_EVENTO', 'type']
@@ -902,6 +1021,17 @@ model_features = [
     'mean_delta_next_6',
     'next_pressure_relation',
     'estimated_delta',
+    'delta_WHP_historical_max',
+    'delta_WHP_historical_mean',
+    'delta_WHP_historical_median',
+    'delta_WHP_rolling6_max',
+    'delta_WHP_rolling6_mean',
+    'delta_WHP_rolling6_median',
+    'delta_WHP_rolling3_max',
+    'delta_WHP_rolling3_mean',
+    'delta_WHP_rolling3_median',
+    # 'delta_WHP_mean',
+    # 'delta_WHP_median'
     # 'id_row',
     # 'diff_next_row',
     # 'n_padres_in_stage',
@@ -977,7 +1107,7 @@ df.type.value_counts()
 # -
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 0.7941
+# Best MAE: 0.7903
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -1073,7 +1203,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.83453 de score, 6 puesto hasta el momento
+# > Este modelo dio 0.82376 de score, 6 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
