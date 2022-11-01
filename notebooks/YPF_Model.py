@@ -40,7 +40,7 @@
 #
 # En esta sección describiremos el proceso transitado durante la competencia y las sucesivas marchas y contramarchas dentro de la competencia.
 #
-# - Submit 1:
+# - Submit 1
 #
 # Luego de un análisis exploratorio incial (pandas profiling no agregado a esta notebook + algunos distribuciones de la variable target si agregadas) se probo un baseline con todos los delta en 0 (1.21) para tener un score de referencia
 #
@@ -104,6 +104,14 @@
 # *['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']*
 #
 # esto da un mae de validación de 0.79 (seguimos sin movernos aca) pero un puntaje en lb de 0.81 (sexto hasta el momento)
+#
+# - Submit 17
+#
+# Se probaron variables como Tramo (una variable creada a traves del ID FILA para determinar alguna información extra del armado de la data) sin resultados.
+#
+# También se trato de estimar el WHP_i de una estapa posterior con una regresión de grado n, obteniendo peores resultados.
+#
+# Se analizan las predicciones en función de la métrica, las estimaciones cercanas a cero (<2.5) se pasan a 0 y esto mejora mucho el MAE en validacion de 0.79 a 0.73, lo mismo en el lb 0.74574 (primero hasta el momento!)
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -133,7 +141,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v16'
+version = 'v17'
 
 
 def read_data():
@@ -468,6 +476,21 @@ chart_evolution(df, color='CAMPO')
 
 # > Evidentemente el set de train se ordeno por presión inicial en varios tramos pero esto no tiene nada que ver con el orden de los eventos, en un principio parecia ya que la presión inicial de los pozos suele incrementarse
 
+# Veamos de separar estos lotes de filas en tramos y evaluar el delta en cada uno, tal vez agregue algun tipo de información
+
+# +
+df['Tramo'] = None
+df.loc[df.ID_FILA < 17000, 'Tramo'] = 'Tramo 1'
+df.loc[(df.ID_FILA < 25618) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 2'
+df.loc[(df.ID_FILA < 25930) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 3'
+df.loc[(df.ID_FILA < 26179) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 4'
+
+displayhook(df.Tramo.value_counts())
+displayhook(df.groupby('Tramo').delta_WHP.mean())
+# -
+
+# Podemos intentar imputar la data de test de alguna forma y ver si esta data suma al modelo
+
 # ### Evolución presión
 
 title = 'presión inicial'
@@ -712,10 +735,11 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
 
     group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
     df = df.sort_values(by=group_vars + ['WHP_i'])
-    if future:
-        grouped = df[df.type == 'Train'].groupby(group_vars)
-    else:
-        grouped = df.groupby(group_vars)
+    # if future:
+    #     grouped = df[df.type == 'Train'].groupby(group_vars)
+    # else:
+    #     grouped = df.groupby(group_vars)
+    grouped = df.groupby(group_vars)
 
     for i in vars_dict:
         print("Calculating " + i + " aggregations..")
@@ -802,24 +826,6 @@ def stage_vars(df):
 # stage_vars(df[condition])
 
 
-# -
-
-
-def dad_vars(df):
-    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
-    df = df.sort_values(by=group_cols + ['WHP_i'])
-    grouped = df.groupby(group_cols)
-
-    df['n_padres_in_stage'] = grouped['PADRE'].transform(lambda x: x.nunique())
-    # df['max_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.max())
-    # df['min_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.min())
-    df['n_deltas_not_cero_in_stage'] = grouped['delta_WHP'].transform(
-        lambda x: sum(abs(x) > 0)
-    )
-
-    return df
-
-
 # +
 from sklearn.preprocessing import PolynomialFeatures
 
@@ -872,6 +878,13 @@ def fe(df):
     df['HIJO_int'] = df.HIJO.str[5:].astype(int)
     df['HIJO_group'] = df.HIJO_int.floordiv(10)
     df['PAD_HIJO_int'] = df.PAD_HIJO.str[4:].astype(int)
+
+    df['Tramo'] = None
+    df.loc[df.ID_FILA < 17000, 'Tramo'] = 'Tramo 1'
+    df.loc[(df.ID_FILA < 25618) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 2'
+    df.loc[(df.ID_FILA < 25930) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 3'
+    df.loc[(df.ID_FILA < 26179) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 4'
+    df['Tramo'] = df['Tramo'].fillna(method='ffill')
 
     df = df.sort_values(
         by=['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
@@ -950,8 +963,8 @@ def validate_model(df, target_col, feat_cols, params):
         valid_sets=[lgb_train, lgb_eval],
         valid_names=['Train', 'Valid'],
         verbose_eval=10,
-        num_boost_round=2000,
-        early_stopping_rounds=50,
+        num_boost_round=1000,
+        early_stopping_rounds=10,
         evals_result=lgb_results,
     )
     print(gbm.best_iteration)
@@ -994,12 +1007,10 @@ def validate_model(df, target_col, feat_cols, params):
     return gbm, y_pred
 
 
-def lgbm_cross_validation(
-    df,
-    target_col,
-    feat_cols,
-    params,  # n_splits=3, random_state=2221
-):
+# +
+
+
+def lgbm_cross_validation(df, target_col, feat_cols, params, n_splits=3):
 
     list_str_obj_cols = df[feat_cols].columns[df[feat_cols].dtypes == "object"].tolist()
     for str_obj_col in list_str_obj_cols:
@@ -1009,8 +1020,17 @@ def lgbm_cross_validation(
     print(f'Categorical columns:{cats_feats}')
 
     lgb_train = lgb.Dataset(df[feat_cols], label=df[target_col])
-    lgb.cv(params, lgb_train, categorical_feature=list(cats_feats))
-    return None
+    cv_results = lgb.cv(
+        params,
+        lgb_train,
+        num_boost_round=1000,
+        nfold=n_splits,
+        early_stopping_rounds=50,
+        categorical_feature=list(cats_feats),
+        metrics='mae',
+        stratified=False,
+    )
+    return cv_results
 
 
 # + [markdown] id="k72M5nnqa4sp"
@@ -1030,9 +1050,6 @@ df = fe(df)
 
 # + [markdown] id="mvZECIc_dHYv"
 # ### Features
-# -
-
-df.columns
 
 # + id="KhHfwjnkdQQK"
 header_cols = ['ID_FILA', 'ID_EVENTO', 'type']
@@ -1072,6 +1089,7 @@ model_features = [
     'delta_WHP_rolling3_median',
     # 'estimated_delta_diff_mean',
     # 'estimated_delta_diff_median',
+    # 'Tramo',
     'max_delta_next_6',
     'mean_delta_next_6',
     'next_pressure_relation',
@@ -1155,27 +1173,33 @@ params = {
 
 df.type.value_counts()
 
-df.type.value_counts()
-
-# +
-# lgbm_cross_validation(df[(df.type != 'Test')].copy(), target, model_features, params, n_splits=3)
-# -
+cv_result = lgbm_cross_validation(
+    df[(df.type != 'Test')].copy(), target, model_features, params, n_splits=3
+)
+cv_result = pd.DataFrame(cv_result)
+cv_result.tail()
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
 # Best MAE: 0.7903
 
 # ### Análisis mayores diferencias respecto del target
 
-header_cols
-
 aux = df[df.type == 'Validation'].reset_index(drop=True)
 aux['preds'] = pd.Series(preds, name='preds')
-aux = aux[header_cols + [target] + ['preds']]
+aux = aux[header_cols + [target] + ['preds', 'estimated_delta']]
 mae = mean_absolute_error(aux[target], aux['preds'])
 print("MAE original:", mae)
 
+print(aux.head())
+
+aux.loc[abs(aux.preds) < 2.5, 'preds'] = 0.0
+mae = mean_absolute_error(aux[target], aux['preds'])
+print("MAE fixed:", mae)
+
 aux['diffReal'] = (aux[target] - aux.preds).abs()
 aux.sort_values(by='diffReal', ascending=False).head(10)
+
+aux.sort_values(by='diffReal', ascending=False).tail(10)
 
 df[(df.PADRE_int == 324) & (df.HIJO_int == 531)]
 
@@ -1215,7 +1239,7 @@ def train_final(df, num_rounds, feat_cols, target_col, params):
     return gbm
 
 
-model_final = train_final(df, model.best_iteration, model_features, target, params)
+model_final = train_final(df, cv_result.shape[0] - 1, model_features, target, params)
 
 
 # + [markdown] id="k2Tl_IEdqH3c"
@@ -1249,6 +1273,9 @@ submission.head()
 
 # ### Fixes sobre file de submission
 
+submission.loc[abs(submission[target]) < 2.5, target] = 0.0
+
+
 # ### Guardando solución
 
 # + id="dhcNOaT6rAaA"
@@ -1258,7 +1285,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.81842 de score, 6 puesto hasta el momento
+# > Este modelo dio 0.74574 de score, 1 puesto hasta el momento!
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
