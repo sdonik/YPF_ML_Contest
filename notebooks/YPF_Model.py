@@ -75,9 +75,9 @@
 # - Submit 12
 #
 # Abandonada la idea de rearmar el flujo de alteraciones se generan variables futuras que son de peso para la mejora como:
-#     'max_delta_next_6',
-#     'mean_delta_next_6',
-#     'next_pressure_relation',
+#     *max_delta_next_6*,
+#     *mean_delta_next_6*,
+#     *next_pressure_relation*
 #
 # Dando en validation 0.8264 y en lb 0.86 (septimo hasta el momento)
 #
@@ -87,7 +87,23 @@
 #
 # - Submit 14
 #
-# Funcion 'get_dad_vars' con variables asociadas al pozo padre, es decir tomamos todas las interacciones para ese pozo, las ordenamos por presion inicial ascendente (esto deja de tomar a la etapa como factor de orden) y calcula métricas como el max, mean y mediana de esos deltas
+# Funcion *get_dad_vars* con variables asociadas al pozo padre, es decir tomamos todas las interacciones para ese pozo, las ordenamos por presion inicial ascendente (esto deja de tomar a la etapa como factor de orden) y calcula métricas como el max, mean y mediana de esos deltas, esto da un score de 0.79 en validacion y 0.82 en lb
+#
+# - Submit 15
+#
+# Se agregaro a *get_dad_vars* la funcion de cálculo rolling forward obteniendo el mejor puntaje de validación hasta el momento 0.60, lamentablemente dio mucho peor en el lb 1.02. Se estima que es un problema de overfitting sobre el set de validación que aún no se puede corregir.
+#
+# - Submit 16
+#
+# Buscando la razón del error del submit anterior, se encuentra que en todo el script se está ordenando por:
+#
+# *['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO']*
+#
+# Y se cambia tomando las variables enteras de dichas segmentaciones, ya que el nombre de pad y pozo puede significar un orden temporal:
+#
+# *['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']*
+#
+# esto da un mae de validación de 0.79 (seguimos sin movernos aca) pero un puntaje en lb de 0.81 (sexto hasta el momento)
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -111,14 +127,13 @@ pd.set_option('display.float_format', lambda x: '%.3f' % x)
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.max_rows', 500)
 
-USE_PRECOMPUTED = True
 TUNE_PARAMETERS = False
 
 # + id="xnA0ej_qZcuU"
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v14'
+version = 'v16'
 
 
 def read_data():
@@ -578,8 +593,8 @@ df[df.AZ > 350].head()
 
 
 def shifted_vars(df):
-    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
-    df = df.sort_values(by=group_cols)
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
+    df = df.sort_values(by=group_cols + ['ETAPA_HIJO'])
     grouped = df.groupby(group_cols)
     # calc shifted columns per padre-hijo relation
 
@@ -652,7 +667,7 @@ def get_agg_from_train(
         pd.Series: una columna con el nombre var_to_aggregate+'_'+function
     """
     if col_to_aggregate is None:
-        to_group = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
+        to_group = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
         col_to_aggregate = ''
     else:
         to_group = col_to_aggregate
@@ -668,7 +683,7 @@ def get_agg_from_train(
     return aux
 
 
-def get_dad_vars(df, vars_dict, rolling_window=100):
+def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
     """Genera variables del padre segun su historico de eventos ordenados por presion ascendente. Si no se indica una ventana de tiempo se generan variables
     históricas de comportamiento, de lo contrario se observan rolling_window filas hacia atras.
 
@@ -680,18 +695,32 @@ def get_dad_vars(df, vars_dict, rolling_window=100):
     Returns:
         pd.DataFrame: devuelve el set de datos con las nuevas columnas agregadas
     """
-    if rolling_window == 100:
+    window = rolling_window
+    if future:
+        fut_preffix = '_next'
+        indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=rolling_window)
+        rolling_name = rolling_window
+        rolling_window = indexer
+    else:
+        rolling_name = rolling_window
+        fut_preffix = ''
+
+    if window == 100:
         rolling_name = '_historical_'
     else:
-        rolling_name = '_rolling' + str(rolling_window) + '_'
+        rolling_name = '_rolling' + str(rolling_name) + '_'
 
-    group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE']
+    group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
     df = df.sort_values(by=group_vars + ['WHP_i'])
-    grouped = df.groupby(group_vars)
+    if future:
+        grouped = df[df.type == 'Train'].groupby(group_vars)
+    else:
+        grouped = df.groupby(group_vars)
+
     for i in vars_dict:
         print("Calculating " + i + " aggregations..")
         for j in vars_dict[i]:
-            var_name = i + rolling_name + j
+            var_name = i + rolling_name + j + fut_preffix
             print('\t' + var_name)
             if j == 'max':
                 df[var_name] = grouped[i].transform(
@@ -754,7 +783,7 @@ def trigonometric_vars(df):
 
 # +
 def stage_vars(df):
-    group_cols = ['HIJO', 'ETAPA_HIJO']
+    group_cols = ['HIJO_int', 'ETAPA_HIJO']
     grouped = df[df.type == 'Train'].groupby(group_cols)
     df['n_padres_in_stage'] = grouped['PADRE'].transform(lambda x: x.nunique())
     # df['max_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.max())
@@ -777,7 +806,7 @@ def stage_vars(df):
 
 
 def dad_vars(df):
-    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE']
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
     df = df.sort_values(by=group_cols + ['WHP_i'])
     grouped = df.groupby(group_cols)
 
@@ -807,8 +836,8 @@ def linear_regressor_model(df):
 def linear_regressor(df):
 
     df['ETAPA_HIJO_plus_1'] = df['ETAPA_HIJO'] + 1
-    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO']
-    df = df.sort_values(by=group_cols)
+    group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
+    df = df.sort_values(by=group_cols + ['ETAPA_HIJO'])
     grouped = df.groupby(group_cols)
     result = grouped.apply(linear_regressor_model)
     print(result)
@@ -838,25 +867,36 @@ def fe(df):
     Returns:
         pd.DataFrame: set de datos final
     """
-    df = df.sort_values(
-        by=['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO']
-    )  # ,ascending=[True,True,True,True,True,False])
 
     df['PADRE_int'] = df.PADRE.str[5:].astype(int)
     df['HIJO_int'] = df.HIJO.str[5:].astype(int)
     df['HIJO_group'] = df.HIJO_int.floordiv(10)
     df['PAD_HIJO_int'] = df.PAD_HIJO.str[4:].astype(int)
 
+    df = df.sort_values(
+        by=['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
+    )
+
     df = shifted_vars(df)
     df = trigonometric_vars(df)
     df = stage_vars(df)
     df = df.merge(get_agg_from_train(df), how='left')
     df = df.merge(get_agg_from_train(df, function='median'), how='left')
+    df = df.merge(
+        get_agg_from_train(df, var_to_aggregate='estimated_delta_diff'), how='left'
+    )
+    df = df.merge(
+        get_agg_from_train(
+            df, var_to_aggregate='estimated_delta_diff', function='median'
+        ),
+        how='left',
+    )
 
     historical_agg = {
         'delta_WHP': ['max', 'mean', 'median'],
     }
     df = get_dad_vars(df, historical_agg)
+    df = get_dad_vars(df, historical_agg, future=True)
 
     last_months_agg = {
         'delta_WHP': ['max', 'mean', 'median'],
@@ -864,8 +904,12 @@ def fe(df):
 
     # variables from rolling6
     df = get_dad_vars(df, last_months_agg, rolling_window=6)
+    df = get_dad_vars(df, last_months_agg, rolling_window=6, future=True)
+
     # variables from rolling3
     df = get_dad_vars(df, last_months_agg, rolling_window=3)
+    df = get_dad_vars(df, last_months_agg, rolling_window=3, future=True)
+
     return df
 
 
@@ -1017,10 +1061,6 @@ model_features = [
     'mean_delta_last_6',
     'prev_pressure_relation',
     'AZ_D2D_oposite',
-    'max_delta_next_6',
-    'mean_delta_next_6',
-    'next_pressure_relation',
-    'estimated_delta',
     'delta_WHP_historical_max',
     'delta_WHP_historical_mean',
     'delta_WHP_historical_median',
@@ -1030,6 +1070,21 @@ model_features = [
     'delta_WHP_rolling3_max',
     'delta_WHP_rolling3_mean',
     'delta_WHP_rolling3_median',
+    # 'estimated_delta_diff_mean',
+    # 'estimated_delta_diff_median',
+    'max_delta_next_6',
+    'mean_delta_next_6',
+    'next_pressure_relation',
+    'estimated_delta',
+    # 'delta_WHP_historical_max_next',
+    # 'delta_WHP_historical_mean_next',
+    # 'delta_WHP_historical_median_next',
+    # 'delta_WHP_rolling6_max_next',
+    # 'delta_WHP_rolling6_mean_next',
+    # 'delta_WHP_rolling6_median_next',
+    # 'delta_WHP_rolling3_max_next',
+    # 'delta_WHP_rolling3_mean_next',
+    # 'delta_WHP_rolling3_median_next',
     # 'delta_WHP_mean',
     # 'delta_WHP_median'
     # 'id_row',
@@ -1203,7 +1258,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.82376 de score, 6 puesto hasta el momento
+# > Este modelo dio 0.81842 de score, 6 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
