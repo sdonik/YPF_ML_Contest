@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: light
 #       format_version: '1.5'
-#       jupytext_version: 1.13.8
+#       jupytext_version: 1.14.1
 #   kernelspec:
 #     display_name: Python 3 (ipykernel)
 #     language: python
@@ -29,7 +29,7 @@
 #
 # La pérdida de integridad de un pozo padre trae aparejado un importante costo debido a los riesgos de seguridad que conlleva, la posible detención de sets de fractura, costos de remediación y costo de oportunidad de equipos que se destinan a asegurar pozos padres. Por lo tanto, se requiere desarrollar un modelo predictivo que permita identificar los pozos con riesgo a ser interferidos y la magnitud de los frac-hits asociados.
 #
-# En este contexto, el objetivo del concurso actual es el desarrollo de un algoritmo de predicción de incremento de presión como consecuencia de todos los frac-hits que pueda recibir un pozo padre a raíz de la estimulación de un conjunto de pozos hijos cercanos.
+# En este contexto, **el objetivo del concurso actual es el desarrollo de un algoritmo de predicción de incremento de presión (delta_WHP)** como consecuencia de todos los frac-hits que pueda recibir un pozo padre a raíz de la estimulación de un conjunto de pozos hijos cercanos.
 #
 # Se busca optimizar los pozos que ingresan al protocolo de aseguramiento, minimizando dos tipos de pozos: los pozos no asegurados que son interferidos y los pozos asegurados que no son interferidos. El resultado mejora la gestión de los riesgos que se asume y optimizando los costos de lifting asociados. El alcance del modelo es para pozos productores en Yacimientos No Convencionales de Petróleo y Gas.
 #
@@ -112,11 +112,16 @@
 # También se trato de estimar el WHP_i de una estapa posterior con una regresión de grado n, obteniendo peores resultados.
 #
 # Se analizan las predicciones en función de la métrica, las estimaciones cercanas a cero (<2.5) se pasan a 0 y esto mejora mucho el MAE en validacion de 0.79 a 0.73, lo mismo en el lb 0.74574 (primero hasta el momento!)
+#
+# - Submits 18,19,20
+#
+# Sin mejoras, se probaron algunos intentos de calculos sobre variables de etapas futuras sin éxito, también se optimizaron parámetros de lightgbm que dieron mejoras en validación (0.783) pero no en lb (0.754)
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
 
 import math
+import warnings
 
 # + id="NjKshGeHZXPt"
 from sys import displayhook
@@ -134,6 +139,8 @@ from sklearn.model_selection import train_test_split
 pd.set_option('display.float_format', lambda x: '%.3f' % x)
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.max_rows', 500)
+warnings.filterwarnings('ignore')
+
 
 TUNE_PARAMETERS = False
 
@@ -141,7 +148,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v17'
+version = 'v20'
 
 
 def read_data():
@@ -601,10 +608,7 @@ chart_evolution(df, father_name='Pozo 212', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 5', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 382', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 91', x='id_row', color='type')
-# -
 
-
-df[df.AZ > 350].head()
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
@@ -672,8 +676,6 @@ def shifted_vars(df):
     # ] = 0.0
     # df.estimated_delta = df.estimated_delta.fillna(0)
 
-    df['estimated_delta_diff'] = df['delta_WHP'] - df['estimated_delta']
-
     return df
 
 
@@ -734,12 +736,15 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
         rolling_name = '_rolling' + str(rolling_name) + '_'
 
     group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
-    df = df.sort_values(by=group_vars + ['WHP_i'])
     # if future:
     #     grouped = df[df.type == 'Train'].groupby(group_vars)
     # else:
     #     grouped = df.groupby(group_vars)
+
+    df = df.sort_values(by=group_vars + ['WHP_i'])
     grouped = df.groupby(group_vars)
+
+    # grouped = df.groupby(group_vars)
 
     for i in vars_dict:
         print("Calculating " + i + " aggregations..")
@@ -828,34 +833,60 @@ def stage_vars(df):
 
 # +
 from sklearn.preprocessing import PolynomialFeatures
+from statsmodels.regression.rolling import RollingOLS
+from statsmodels.tools.tools import add_constant
 
 
-def linear_regressor_model(df):
-    pf = PolynomialFeatures(degree=4)
+def linear_regressor_model(df, var_to_predict):
+    pf = PolynomialFeatures(degree=1)
     X = pf.fit_transform(df[['ETAPA_HIJO']].values.reshape(-1, 1))
-    y = df[['WHP_i']].values
+    y = df[[var_to_predict]].values
     to_pred = pf.fit_transform(df[['ETAPA_HIJO_plus_1']].values.reshape(-1, 1))
 
-    return np.squeeze(LinearRegression().fit(X, y).predict(to_pred))
+    return np.squeeze(LinearRegression().fit(X, y).predict(to_pred)).coef_[0]
 
 
-def linear_regressor(df):
+def linear2(df, var_to_predict, window):
+    # display(df[['PADRE','HIJO','ETAPA_HIJO','D3D']])
+    y = df[var_to_predict]
+    x = add_constant(df['ETAPA_HIJO'])
+    if x.shape[0] == 1:
+        return None
+    model = RollingOLS(y, x, expanding=True, window=window, min_nobs=2).fit()
+
+    return model.params[['ETAPA_HIJO']]
+
+
+def linear_regressor(df, var_to_predict, var_result_name, window=6):
 
     df['ETAPA_HIJO_plus_1'] = df['ETAPA_HIJO'] + 1
     group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
     df = df.sort_values(by=group_cols + ['ETAPA_HIJO'])
     grouped = df.groupby(group_cols)
-    result = grouped.apply(linear_regressor_model)
-    print(result)
-    result = result.rename('linear_preds')
-    result = result.explode('linear_preds')
-    df['linear_predictions'] = result.values
-    df['estimated_delta_prediction'] = df['linear_predictions'] - df['WHP_i']
+    # rolling = grouped.apply(lambda x: print(x ,'-------------'))# RollingOLS(endog=df[var_to_predict], exog=add_constant(x['ETAPA_HIJO']), expanding=True, window=3).fit().params)
+    # rolling = rolling[['ETAPA_HIJO']]
+    # rolling.columns = [var_result_name]
+    # print("rolling: ", rolling)
+
+    result = grouped.apply(lambda x: linear2(x, var_to_predict, window))
+    result.columns = [var_result_name]
+    result = result.reset_index()
+
+    result = result.set_index('level_5')
+    result = result[[var_result_name]]
+    print("result: ", result)
+    df = df.join(result, how='left')
+    # df[var_result_name] = result['ETAPA_HIJO'].values
 
     return df
 
 
 # print(linear_regressor(df[(df.HIJO=='Pozo 400') & (df.PADRE=='Pozo 212')])[['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO','ETAPA_HIJO','ETAPA_HIJO_plus_1','delta_WHP','estimated_delta','estimated_delta_prediction','WHP_i','linear_predictions']])
+
+# print(linear_regressor(df[(df.PADRE=='Pozo 97') & (df.HIJO=='Pozo 142')], var_to_predict='D3D', var_result_name='prueba'))#[['HIJO','ETAPA_HIJO','ETAPA_HIJO_plus_1','D3D','prueba']])
+# print(linear_regressor(df[(df.PADRE=='Pozo 1') & (df.HIJO=='Pozo 461')], var_to_predict='D3D', var_result_name='prueba'))#[['HIJO','ETAPA_HIJO','ETAPA_HIJO_plus_1','D3D','prueba']])
+
+# print(linear_regressor(df[(df.PADRE.isin(['Pozo 97','Pozo 1']))], var_to_predict='D3D', var_result_name='prueba'))#[['HIJO','ETAPA_HIJO','ETAPA_HIJO_plus_1','D3D','prueba']])
 
 
 # -
@@ -895,15 +926,6 @@ def fe(df):
     df = stage_vars(df)
     df = df.merge(get_agg_from_train(df), how='left')
     df = df.merge(get_agg_from_train(df, function='median'), how='left')
-    df = df.merge(
-        get_agg_from_train(df, var_to_aggregate='estimated_delta_diff'), how='left'
-    )
-    df = df.merge(
-        get_agg_from_train(
-            df, var_to_aggregate='estimated_delta_diff', function='median'
-        ),
-        how='left',
-    )
 
     historical_agg = {
         'delta_WHP': ['max', 'mean', 'median'],
@@ -912,7 +934,7 @@ def fe(df):
     df = get_dad_vars(df, historical_agg, future=True)
 
     last_months_agg = {
-        'delta_WHP': ['max', 'mean', 'median'],
+        'delta_WHP': ['max', 'mean', 'median', 'min'],
     }
 
     # variables from rolling6
@@ -922,6 +944,9 @@ def fe(df):
     # variables from rolling3
     df = get_dad_vars(df, last_months_agg, rolling_window=3)
     df = get_dad_vars(df, last_months_agg, rolling_window=3, future=True)
+
+    # df = linear_regressor(df, var_to_predict='D3D', var_result_name='distance_pending')
+    # df = linear_regressor(df, var_to_predict='WHP_i', var_result_name='initial_pressure_pending')
 
     return df
 
@@ -964,7 +989,7 @@ def validate_model(df, target_col, feat_cols, params):
         valid_names=['Train', 'Valid'],
         verbose_eval=10,
         num_boost_round=1000,
-        early_stopping_rounds=10,
+        early_stopping_rounds=250,
         evals_result=lgb_results,
     )
     print(gbm.best_iteration)
@@ -1087,8 +1112,8 @@ model_features = [
     'delta_WHP_rolling3_max',
     'delta_WHP_rolling3_mean',
     'delta_WHP_rolling3_median',
-    # 'estimated_delta_diff_mean',
-    # 'estimated_delta_diff_median',
+    # 'distance_pending',
+    # 'initial_pressure_pending',
     # 'Tramo',
     'max_delta_next_6',
     'mean_delta_next_6',
@@ -1101,6 +1126,7 @@ model_features = [
     # 'delta_WHP_rolling6_mean_next',
     # 'delta_WHP_rolling6_median_next',
     # 'delta_WHP_rolling3_max_next',
+    # 'delta_WHP_rolling3_min_next',
     # 'delta_WHP_rolling3_mean_next',
     # 'delta_WHP_rolling3_median_next',
     # 'delta_WHP_mean',
@@ -1119,53 +1145,99 @@ target = 'delta_WHP'
 
 # Proceso de optimización de hiperparámetros del algortimo, puesto en false por defecto ya que es un poco lento (no mas de 10 min), de aquí salieron los parámetros seteados a continuación.
 
-# +
-# if TUNE_PARAMETERS:
-#     from verstack import LGBMTuner
-#     train_filter = df['SetType'] == 'Train'
-#     valid_filter = df['SetType'] == 'Validation'
-#     list_str_obj_cols = (
-#         df[model_features].columns[df[model_features].dtypes == "object"].tolist()
-#     )
-#     for str_obj_col in list_str_obj_cols:
-#         df[str_obj_col] = df[str_obj_col].astype("category")
-#     print(
-#         f'Categorical columns:{df[model_features].columns[df[model_features].dtypes == "category"]}'
-#     )
-#     X_train, y_train = (
-#         df.loc[train_filter, model_features],
-#         df.loc[train_filter, target],
-#     )
-#     X_valid, y_valid = (
-#         df.loc[valid_filter, model_features],
-#         df.loc[valid_filter, target],
-#     )
-#     # tune the hyperparameters and fit the optimized model
-#     tuner = LGBMTuner(metric='mae')  # <- the only required argument
-#     tuner.fit(X_train, y_train)
-#     # check the optimization log in the console.
-#     pred = tuner.predict(X_valid)
-#     mae = mean_absolute_error(y_valid, pred)
-#     print("Best MAE:", mae)
-#     print(tuner.best_params)
-# -
+if TUNE_PARAMETERS:
+    import optuna
+    import optuna.integration.lightgbm as lgbopt
+    from sklearn.model_selection import RepeatedKFold
+
+    params = {
+        "objective": "regression",
+        "metric": "mae",
+        "learning_rate": 0.01,
+        "verbosity": -1,
+        "boosting_type": "gbdt",
+        "seed": 42,
+    }
+
+    train_filter = df['type'] == 'Train'
+    valid_filter = df['type'] == 'Validation'
+    list_str_obj_cols = (
+        df[model_features].columns[df[model_features].dtypes == "object"].tolist()
+    )
+    for str_obj_col in list_str_obj_cols:
+        df[str_obj_col] = df[str_obj_col].astype("category")
+
+    categorical_columns = df[model_features].columns[
+        df[model_features].dtypes == "category"
+    ]
+    print(f'Categorical columns:{categorical_columns}')
+    X_train, y_train = (
+        df.loc[train_filter, model_features],
+        df.loc[train_filter, target],
+    )
+    X_valid, y_valid = (
+        df.loc[valid_filter, model_features],
+        df.loc[valid_filter, target],
+    )
+
+    # sampler = TPESampler(seed=1)
+    study = optuna.create_study(study_name="lightgbm", direction="minimize")
+    dtrain = lgbopt.Dataset(X_train, label=y_train)
+    dvalid = lgbopt.Dataset(X_valid, label=y_valid)
+
+    # Suppress information only outputs - otherwise optuna is
+    # quite verbose, which can be nice, but takes up a lot of space
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    rkf = RepeatedKFold(n_splits=10, n_repeats=10, random_state=42)
+
+    # Run optuna LightGBMTunerCV tuning of LightGBM with cross-validation
+    tuner = lgbopt.LightGBMTuner(
+        params,
+        dtrain,
+        valid_sets=[dtrain, dvalid],
+        # categorical_feature=categorical_columns,
+        study=study,
+        verbose_eval=False,
+        early_stopping_rounds=250,
+        num_boost_round=10000,
+    )
+    tuner.run()
+    print(tuner.get_best_booster().params)
 
 # ### Parámetros
 
+# params = {
+#     'boosting_type': 'gbdt',
+#     'objective': 'regression',
+#     'metric': 'mae',
+#     'learning_rate': 0.01,
+#     #    'lambda_l1': 0.5,
+#     #    'lambda_l2': 0.5,
+#     'num_leaves': 100,
+#     'feature_fraction': 0.7,
+#     'bagging_fraction': 0.7,
+#     'bagging_freq': 5,
+#     'min_child_samples': 30,
+#     'seed': 1003,
+#     'n_estimators': 2000,
+# }
 params = {
-    'boosting_type': 'gbdt',
     'objective': 'regression',
-    'metric': 'mae',
+    'metric': 'l1',
     'learning_rate': 0.01,
-    #    'lambda_l1': 0.5,
-    #    'lambda_l2': 0.5,
-    'num_leaves': 100,
-    'feature_fraction': 0.7,
-    'bagging_fraction': 0.7,
-    'bagging_freq': 5,
-    'min_child_samples': 30,
-    'seed': 1003,
-    'n_estimators': 2000,
+    'verbosity': -1,
+    'boosting_type': 'gbdt',
+    'seed': 42,
+    'feature_pre_filter': False,
+    'lambda_l1': 0.0015119589996606935,
+    'lambda_l2': 0.00014593792325611913,
+    'num_leaves': 43,
+    'feature_fraction': 1.0,
+    'bagging_fraction': 0.8893463117932137,
+    'bagging_freq': 4,
+    'min_child_samples': 20,
+    'num_iterations': 10000,
 }
 
 
@@ -1180,26 +1252,92 @@ cv_result = pd.DataFrame(cv_result)
 cv_result.tail()
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 0.7903
+# Best MAE: 0.7830
 
 # ### Análisis mayores diferencias respecto del target
 
 aux = df[df.type == 'Validation'].reset_index(drop=True)
 aux['preds'] = pd.Series(preds, name='preds')
-aux = aux[header_cols + [target] + ['preds', 'estimated_delta']]
+aux['diffReal'] = (aux[target] - aux['preds']).abs()
 mae = mean_absolute_error(aux[target], aux['preds'])
 print("MAE original:", mae)
 
-print(aux.head())
 
-aux.loc[abs(aux.preds) < 2.5, 'preds'] = 0.0
+# +
+def print_real_vs_preds(aux):
+    fig = px.scatter(
+        aux,
+        x=aux[target],
+        y=aux['preds'],
+        labels={'x': 'real', 'y': 'prediction'},
+        hover_data=[
+            'CAMPO',
+            'PAD_HIJO',
+            'PADRE',
+            'HIJO',
+            'ETAPA_HIJO',
+        ],
+    )
+    fig.add_shape(
+        type="line",
+        line=dict(dash='dash'),
+        x0=aux[target].min(),
+        y0=aux[target].min(),
+        x1=aux[target].max(),
+        y1=aux[target].max(),
+    )
+    fig.show()
+
+
+print_real_vs_preds(aux)
+# -
+
+# > En este gráfico se observan dos problemas a la hora de realizar predicciones,
+#
+# 1. las predicciones distintas de 0 cuyo valor real es 0
+# 2. las predicciones de deltas elevedos (>50) son subestimadas por el modelo
+
+# 1. Evaluación mae para corrección de predicciones cercanas a 0
+
+# +
+results = pd.DataFrame(columns=['step', 'mae'])
+for i in np.arange(0.0, 5.0, 0.1):
+    current_fix = aux.copy()
+    current_fix.loc[abs(current_fix.preds) < i, 'preds'] = 0.0
+    results = pd.concat(
+        [
+            results,
+            pd.DataFrame(
+                {
+                    'step': [i],
+                    'mae': [
+                        mean_absolute_error(current_fix[target], current_fix['preds'])
+                    ],
+                }
+            ),
+        ]
+    )
+
+fig = px.scatter(
+    results, x=results['step'], y=results['mae'], labels={'x': 'step', 'y': 'mae'}
+)
+fig.show()
+# -
+
+aux.loc[abs(aux.preds) < 1.8, 'preds'] = 0.0
 mae = mean_absolute_error(aux[target], aux['preds'])
 print("MAE fixed:", mae)
 
-aux['diffReal'] = (aux[target] - aux.preds).abs()
-aux.sort_values(by='diffReal', ascending=False).head(10)
+# 2. Deltas > 50 subestimados
+#
+# Aquí no podemos mejorar el score ya que dentro de las predicciones arrojadas no hay un patron de corte claro (estan distribuidas entre todos los valores), por lo cual es una mejora posible para el modelo, agregar variables que ayuden a detectar mejor estos eventos
 
-aux.sort_values(by='diffReal', ascending=False).tail(10)
+# +
+
+aux.sort_values(by='diffReal', ascending=False).head(10)
+# -
+
+aux[aux.diffReal > 0].sort_values(by='diffReal', ascending=False).tail(10)
 
 df[(df.PADRE_int == 324) & (df.HIJO_int == 531)]
 
@@ -1273,7 +1411,7 @@ submission.head()
 
 # ### Fixes sobre file de submission
 
-submission.loc[abs(submission[target]) < 2.5, target] = 0.0
+submission.loc[abs(submission[target]) < 2.3, target] = 0.0
 
 
 # ### Guardando solución
@@ -1285,7 +1423,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.74574 de score, 1 puesto hasta el momento!
+# > Este modelo dio 0.7541 de score, 2 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
