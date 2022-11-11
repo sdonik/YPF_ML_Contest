@@ -116,6 +116,10 @@
 # - Submits 18,19,20
 #
 # Sin mejoras, se probaron algunos intentos de calculos sobre variables de etapas futuras sin éxito, también se optimizaron parámetros de lightgbm que dieron mejoras en validación (0.783) pero no en lb (0.754)
+#
+# - Submit 21
+#
+# Cambio de cálculo de variables en validación, se pasa delta_WHP a None previo a los cálculos de variables y se obtiene peor puntaje en validacion (0.929) pero confiando en un set de validación más estable, este intento dio 0.752 en lb
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -148,7 +152,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v20'
+version = 'v21'
 
 
 def read_data():
@@ -175,17 +179,17 @@ train_df, eval_df, df = read_data()
 
 # -
 
-df = df.sort_values(
-    by=['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO']
-)  # ,ascending=[True,True,True,True,True,False])
-
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | EDA</div>
 
 train_df.shape
 
 displayhook(df.head())
 
-# ### Variable target
+# Ordenamos la data para verla ordenada por etapas en cada hijo
+
+df = df.sort_values(by=['FLUIDO', 'CAMPO', 'PAD_HIJO', 'PADRE', 'HIJO', 'ETAPA_HIJO'])
+
+# ### Análisis de la variable objetivo: delta_WHP
 
 displayhook(train_df['delta_WHP'].describe())
 px.box(train_df['delta_WHP'], width=400, height=400)
@@ -619,62 +623,64 @@ chart_evolution(df, father_name='Pozo 91', x='id_row', color='type')
 # -
 
 
-def shifted_vars(df):
+def shifted_vars(df, future=False):
     group_cols = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
     df = df.sort_values(by=group_cols + ['ETAPA_HIJO'])
-    grouped = df.groupby(group_cols)
+
     # calc shifted columns per padre-hijo relation
 
-    df['prev_delta'] = grouped['delta_WHP'].transform(lambda x: x.shift(1))
-    df['prev_init_pressure'] = grouped['WHP_i'].transform(lambda x: x.shift(1))
+    if future:
+        simple_shift = -1
+        window_3 = pd.api.indexers.FixedForwardWindowIndexer(window_size=3)
+        window_6 = pd.api.indexers.FixedForwardWindowIndexer(window_size=6)
+        preffix = 'next_'
+    else:
+        simple_shift = 1
+        window_3 = 3
+        window_6 = 6
+        preffix = 'prev_'
 
-    df['max_delta_last_3'] = grouped['delta_WHP'].transform(
-        lambda x: x.rolling(window=3, min_periods=1).max().shift()
+    grouped = df.groupby(group_cols)
+    df[preffix + 'initial_pressure'] = grouped['WHP_i'].transform(
+        lambda x: x.shift(simple_shift)
+    )
+    df[preffix + 'stage'] = grouped['ETAPA_HIJO'].transform(
+        lambda x: x.shift(simple_shift)
+    )
+    df[preffix + 'type'] = grouped['type'].transform(lambda x: x.shift(simple_shift))
+    df[preffix + 'type'] = df[preffix + 'type'].apply(
+        lambda x: 'Train' if x == 'Train' else 'Test'
     )
 
-    df['prev_stage'] = grouped['ETAPA_HIJO'].transform(lambda x: x.shift(1))
-    # df['prev_type'] = grouped['type'].transform(lambda x: x.shift(1))
-    # df['diff_prev_stage'] = df['ETAPA_HIJO'] - df['prev_stage']
+    if future:
+        df['diff_' + preffix + 'stage'] = df[preffix + 'stage'] - df['ETAPA_HIJO']
+        df['estimated_' + preffix + 'delta'] = round(
+            df[preffix + 'initial_pressure'] - df['WHP_i'], 3
+        )
+        df[preffix + 'pressure_relation'] = (
+            df[preffix + 'initial_pressure'] / df['WHP_i']
+        )
+    else:
+        df['diff_' + preffix + 'stage'] = df['ETAPA_HIJO'] - df[preffix + 'stage']
+        df[preffix + 'pressure_relation'] = (
+            df['WHP_i'] / df[preffix + 'initial_pressure']
+        )
 
-    df['next_initial_pressure'] = grouped['WHP_i'].transform(lambda x: x.shift(-1))
-    df['next_stage'] = grouped['ETAPA_HIJO'].transform(lambda x: x.shift(-1))
-    df['diff_next_stage'] = df['next_stage'] - df['ETAPA_HIJO']
-    df['estimated_delta'] = round(df['next_initial_pressure'] - df['WHP_i'], 3)
-
-    df['max_delta_last_6'] = grouped['delta_WHP'].transform(
-        lambda x: x.rolling(window=6, min_periods=1).max().shift()
+    df[preffix + 'delta'] = grouped['delta_WHP'].transform(
+        lambda x: x.shift(simple_shift)
     )
-    df['mean_delta_last_6'] = grouped['delta_WHP'].transform(
-        lambda x: x.rolling(window=6, min_periods=1).mean().shift()
+    df['max_delta_' + preffix + '3'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=window_3, min_periods=1).max().shift(simple_shift)
     )
-
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=6)
-    df['max_delta_next_6'] = grouped['delta_WHP'].transform(
-        lambda x: x.rolling(window=indexer, min_periods=1).max().shift()
+    df['max_delta_' + preffix + '6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=window_6, min_periods=1).max().shift(simple_shift)
     )
-    df['mean_delta_next_6'] = grouped['delta_WHP'].transform(
-        lambda x: x.rolling(window=indexer, min_periods=1).mean().shift()
+    df['mean_delta_' + preffix + '6'] = grouped['delta_WHP'].transform(
+        lambda x: x.rolling(window=window_6, min_periods=1).mean().shift(simple_shift)
     )
-    df['prev_pressure_relation'] = df['WHP_i'] / df['prev_init_pressure']
-    df['next_pressure_relation'] = df['next_initial_pressure'] / df['WHP_i']
 
     # if there is more than one stage between rows put delta 0
-    df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = None
-
-    # Better score removing this lines
-    # # if delta is lower than 1 consider as noise
-    # df.loc[(df['estimated_delta'].abs() < 1), 'estimated_delta'] = 0.0
-    # # if delta is bigger than common delta values put fence value
-    # upper_fence = 13.3
-    # lower_fence = 0
-    # df.loc[(df['estimated_delta'] > upper_fence), 'estimated_delta'] = upper_fence
-    # df.loc[(df['estimated_delta'] < lower_fence), 'estimated_delta'] = lower_fence
-    # # if prev delta value is 0, put 0 value
-    # df.loc[
-    #     (df['prev_delta'].isna()),
-    #     'estimated_delta',
-    # ] = 0.0
-    # df.estimated_delta = df.estimated_delta.fillna(0)
+    # df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = None
 
     return df
 
@@ -697,8 +703,7 @@ def get_agg_from_train(
     else:
         to_group = col_to_aggregate
     aux = (
-        df[df['type'] == 'Train']
-        .groupby(to_group)[var_to_aggregate]
+        df.groupby(to_group)[var_to_aggregate]
         .agg({('custom', function), ('n', 'count')})
         .reset_index()
     )
@@ -726,9 +731,11 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
         indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=rolling_window)
         rolling_name = rolling_window
         rolling_window = indexer
+        simple_shift = -1
     else:
         rolling_name = rolling_window
         fut_preffix = ''
+        simple_shift = 1
 
     if window == 100:
         rolling_name = '_historical_'
@@ -736,15 +743,8 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
         rolling_name = '_rolling' + str(rolling_name) + '_'
 
     group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
-    # if future:
-    #     grouped = df[df.type == 'Train'].groupby(group_vars)
-    # else:
-    #     grouped = df.groupby(group_vars)
-
     df = df.sort_values(by=group_vars + ['WHP_i'])
     grouped = df.groupby(group_vars)
-
-    # grouped = df.groupby(group_vars)
 
     for i in vars_dict:
         print("Calculating " + i + " aggregations..")
@@ -755,31 +755,31 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
                 df[var_name] = grouped[i].transform(
                     lambda x: x.rolling(window=rolling_window, min_periods=1)
                     .max()
-                    .shift()
+                    .shift(simple_shift)
                 )
             elif j == 'mean':
                 df[var_name] = grouped[i].transform(
                     lambda x: x.rolling(window=rolling_window, min_periods=1)
                     .mean()
-                    .shift()
+                    .shift(simple_shift)
                 )
             elif j == 'min':
                 df[var_name] = grouped[i].transform(
                     lambda x: x.rolling(window=rolling_window, min_periods=1)
                     .min()
-                    .shift()
+                    .shift(simple_shift)
                 )
             elif j == 'count':
                 df[var_name] = grouped[i].transform(
                     lambda x: x.rolling(window=rolling_window, min_periods=1)
                     .count()
-                    .shift()
+                    .shift(simple_shift)
                 )
             elif j == 'median':
                 df[var_name] = grouped[i].transform(
                     lambda x: x.rolling(window=rolling_window, min_periods=1)
                     .median()
-                    .shift()
+                    .shift(simple_shift)
                 )
 
     return df
@@ -813,7 +813,7 @@ def trigonometric_vars(df):
 # +
 def stage_vars(df):
     group_cols = ['HIJO_int', 'ETAPA_HIJO']
-    grouped = df[df.type == 'Train'].groupby(group_cols)
+    grouped = df.groupby(group_cols)
     df['n_padres_in_stage'] = grouped['PADRE'].transform(lambda x: x.nunique())
     # df['max_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.max())
     # df['min_delta_in_stage'] = grouped['delta_WHP'].transform(lambda x: x.min())
@@ -921,7 +921,11 @@ def fe(df):
         by=['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
     )
 
+    valid_values = df.loc[(df.type == 'Validation'), ['delta_WHP']]
+    df.loc[(df.type == 'Validation'), 'delta_WHP'] = None
+
     df = shifted_vars(df)
+    df = shifted_vars(df, future=True)
     df = trigonometric_vars(df)
     df = stage_vars(df)
     df = df.merge(get_agg_from_train(df), how='left')
@@ -947,6 +951,12 @@ def fe(df):
 
     # df = linear_regressor(df, var_to_predict='D3D', var_result_name='distance_pending')
     # df = linear_regressor(df, var_to_predict='WHP_i', var_result_name='initial_pressure_pending')
+
+    df = df.sort_values(
+        by=['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
+    )
+
+    df.loc[(df.type == 'Validation'), 'delta_WHP'] = valid_values.values
 
     return df
 
@@ -989,7 +999,7 @@ def validate_model(df, target_col, feat_cols, params):
         valid_names=['Train', 'Valid'],
         verbose_eval=10,
         num_boost_round=1000,
-        early_stopping_rounds=250,
+        early_stopping_rounds=50,
         evals_result=lgb_results,
     )
     print(gbm.best_iteration)
@@ -1073,6 +1083,7 @@ train, test = train_test_split(
 df.loc[test.index, 'type'] = 'Validation'
 df = fe(df)
 
+
 # + [markdown] id="mvZECIc_dHYv"
 # ### Features
 
@@ -1083,8 +1094,8 @@ model_features = [
     'FLUIDO',
     'PAD_HIJO',
     'HIJO',
-    'ETAPA_HIJO',
     'PADRE',
+    'ETAPA_HIJO',
     'D3D',
     'D2D',
     'DZ',
@@ -1093,50 +1104,43 @@ model_features = [
     'LINEAMIENTO',
     'WHP_i',
     'ESTADO',
-    'prev_delta',
-    'HIJO_int',
-    'PADRE_int',
-    'PAD_HIJO_int',
-    # 'prev_stage',
-    # 'diff_prev_stage',
-    'max_delta_last_6',
-    'mean_delta_last_6',
+    # 'PADRE_int', 'HIJO_int', 'HIJO_group', 'PAD_HIJO_int', 'Tramo',
+    # 'prev_initial_pressure', 'prev_stage', 'prev_type', 'diff_prev_stage',
     'prev_pressure_relation',
+    'prev_delta',
+    'max_delta_prev_3',
+    'max_delta_prev_6',
+    'mean_delta_prev_6',
+    'next_initial_pressure',
+    'next_stage',
+    'next_type',
+    'diff_next_stage',
+    'estimated_next_delta',
+    'next_pressure_relation',
+    'next_delta',
+    'max_delta_next_3',
+    'max_delta_next_6',
+    'mean_delta_next_6',
     'AZ_D2D_oposite',
+    # 'n_padres_in_stage', 'n_deltas_not_cero_in_stage',
+    # 'delta_WHP_mean',
+    # 'avg',
+    # 'delta_WHP_median',
     'delta_WHP_historical_max',
     'delta_WHP_historical_mean',
     'delta_WHP_historical_median',
+    # 'delta_WHP_historical_max_next', 'delta_WHP_historical_mean_next',
+    # 'delta_WHP_historical_median_next',
     'delta_WHP_rolling6_max',
     'delta_WHP_rolling6_mean',
-    'delta_WHP_rolling6_median',
+    'delta_WHP_rolling6_median',  # 'delta_WHP_rolling6_min',
+    # 'delta_WHP_rolling6_max_next',
+    # 'delta_WHP_rolling6_mean_next','delta_WHP_rolling6_median_next',
+    # 'delta_WHP_rolling6_min_next',
     'delta_WHP_rolling3_max',
     'delta_WHP_rolling3_mean',
-    'delta_WHP_rolling3_median',
-    # 'distance_pending',
-    # 'initial_pressure_pending',
-    # 'Tramo',
-    'max_delta_next_6',
-    'mean_delta_next_6',
-    'next_pressure_relation',
-    'estimated_delta',
-    # 'delta_WHP_historical_max_next',
-    # 'delta_WHP_historical_mean_next',
-    # 'delta_WHP_historical_median_next',
-    # 'delta_WHP_rolling6_max_next',
-    # 'delta_WHP_rolling6_mean_next',
-    # 'delta_WHP_rolling6_median_next',
-    # 'delta_WHP_rolling3_max_next',
-    # 'delta_WHP_rolling3_min_next',
-    # 'delta_WHP_rolling3_mean_next',
-    # 'delta_WHP_rolling3_median_next',
-    # 'delta_WHP_mean',
-    # 'delta_WHP_median'
-    # 'id_row',
-    # 'diff_next_row',
-    # 'n_padres_in_stage',
-    # 'max_delta_in_stage',
-    # 'min_delta_in_stage',
-    # 'n_deltas_not_cero_in_stage'
+    'delta_WHP_rolling3_median',  # 'delta_WHP_rolling3_min',
+    # 'delta_WHP_rolling3_max_next', 'delta_WHP_rolling3_mean_next', 'delta_WHP_rolling3_median_next','delta_WHP_rolling3_min_next'
 ]
 target = 'delta_WHP'
 # -
@@ -1148,6 +1152,8 @@ target = 'delta_WHP'
 if TUNE_PARAMETERS:
     import optuna
     import optuna.integration.lightgbm as lgbopt
+
+    # from optuna.samplers import TPESampler
     from sklearn.model_selection import RepeatedKFold
 
     params = {
@@ -1158,6 +1164,10 @@ if TUNE_PARAMETERS:
         "boosting_type": "gbdt",
         "seed": 42,
     }
+    train, test = train_test_split(
+        df[(df.type != 'Test')], test_size=0.3, random_state=1112
+    )
+    df.loc[test.index, 'type'] = 'Validation'
 
     train_filter = df['type'] == 'Train'
     valid_filter = df['type'] == 'Validation'
@@ -1240,19 +1250,19 @@ params = {
     'num_iterations': 10000,
 }
 
-
 # ### Validación
 
-df.type.value_counts()
-
-cv_result = lgbm_cross_validation(
-    df[(df.type != 'Test')].copy(), target, model_features, params, n_splits=3
-)
-cv_result = pd.DataFrame(cv_result)
-cv_result.tail()
+# +
+# cv_result = lgbm_cross_validation(
+#     df[(df.type != 'Test')].copy(), target, model_features, params, n_splits=3
+# )
+# cv_result = pd.DataFrame(cv_result)
+# cv_result.tail()
+# -
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 0.7830
+# Best MAE: 0.9291
+# Best MAE fixed: 0.8453
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -1324,7 +1334,10 @@ fig = px.scatter(
 fig.show()
 # -
 
-aux.loc[abs(aux.preds) < 1.8, 'preds'] = 0.0
+opt_cutoff = results.loc[results.mae == results.mae.min(), 'step'].values[0]
+opt_cutoff
+
+aux.loc[abs(aux.preds) < opt_cutoff, 'preds'] = 0.0
 mae = mean_absolute_error(aux[target], aux['preds'])
 print("MAE fixed:", mae)
 
@@ -1338,10 +1351,6 @@ aux.sort_values(by='diffReal', ascending=False).head(10)
 # -
 
 aux[aux.diffReal > 0].sort_values(by='diffReal', ascending=False).tail(10)
-
-df[(df.PADRE_int == 324) & (df.HIJO_int == 531)]
-
-# ### Mejoras predicciones en función de resultados
 
 # + [markdown] id="6dAirrmtp8aM"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">6 | Entrenamiento Modelo</div>
@@ -1377,7 +1386,7 @@ def train_final(df, num_rounds, feat_cols, target_col, params):
     return gbm
 
 
-model_final = train_final(df, cv_result.shape[0] - 1, model_features, target, params)
+model_final = train_final(df, model.best_iteration, model_features, target, params)
 
 
 # + [markdown] id="k2Tl_IEdqH3c"
@@ -1393,7 +1402,7 @@ def predict(df, header_cols, feat_cols, target_col, model):
         model (Booster): modelo para realizar predicciones
 
     Returns:
-        pd.DataFrame: set de datos con algunas variables del loan y su prediccion final
+        pd.DataFrame: set de datos con algunas variables y su prediccion final
     """
     to_infer_filter = df.type == 'Test'
     to_infer = df.loc[to_infer_filter, feat_cols]
@@ -1411,7 +1420,7 @@ submission.head()
 
 # ### Fixes sobre file de submission
 
-submission.loc[abs(submission[target]) < 2.3, target] = 0.0
+submission.loc[abs(submission[target]) < opt_cutoff, target] = 0.0
 
 
 # ### Guardando solución
@@ -1423,7 +1432,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.7541 de score, 2 puesto hasta el momento
+# > Este modelo dio 0.7529 de score, 2 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
