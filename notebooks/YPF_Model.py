@@ -126,6 +126,26 @@
 # Creación de la variable *estimated_next_delta2*, la misma toma como referencia la siguiente presión mas grande para ese pozo padre (considerando todos los hijos) y con esa presión calcula el delta estimado. Difiere de *estimated_next_delta* porque esta última solo ve la presión inicial de la siguiente etapa de cada pozo hijo.
 #
 # Luego de generar esta variable la validación mejora a 0.9123 y en lb se va a 0.7178 (muy cerquita del primer puesto)
+#
+# - Submit 23
+#
+# Creación de variables relacionando factores entre las mas importantes, ejemplos son +max_delta_prev_next_3_rel*,*mean_delta_prev_next_6_rel* y *max_delta_prev_next_6_rel* la mejora en cv era marginal (0.9119), y en lb empeoro un poco (0.7199), submit solo de ambicioso
+#
+# - Submit 24
+#
+# Saco de *get_dad_vars* el ordenamiento por fluido y pad-hijo esperando mejoras, obtengo mejora marginal en validation (0.9116) y empeora en lb (0.7332)
+#
+# - Submit 25
+#
+# Se prueba usar Padre, Hijo y Pad como enteros mejora en validacion (0.9096) pero no en lb (0.746) estamos muy fino ya midiendo mejoras sobre el set de test
+#
+# - Submit 26
+#
+# Se prueba mejorar la optimización del corte para el fix de ceros, buscando variaciones por campo, numero de pozo padre e hijo y pad, buscando determinar temporalmente si la proporción de deltas mayor a cero crecia. Sin mejoras significativas en validación da peor en lb (0.720)
+#
+# - Submit 27
+#
+#  Creo nueva variable *delta_WHP_max* y refloto variables *delta_WHP_mean* y *delta_WHP_median*, las mismas son calculadas sobre toda la distribución del hijo (excluyendo los puntos del set de validación), anteriormente sustituidas por las rolling historicas (en ese caso tenia spliteadas las pasadas y las futuras). Se ve mejora en validacion (0.893) y su corresponiente mejora en lb (0.675), primer puesto hasta el momento!
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -158,7 +178,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v22'
+version = 'v27'
 
 
 def read_data():
@@ -479,6 +499,7 @@ def chart_evolution(
             'delta_WHP',
             'estimated_delta',
             'CAMPO',
+            'PAD_HIJO',
             'HIJO',
             'ETAPA_HIJO',
         ],
@@ -510,6 +531,14 @@ displayhook(df.groupby('Tramo').delta_WHP.mean())
 
 # ### Evolución presión
 
+df = df.sort_values(by=['FLUIDO', 'CAMPO', 'PADRE', 'WHP_i']).reset_index(drop=True)
+df = df.rename_axis('order').reset_index()
+
+
+# +
+# df[df.PADRE=='Pozo 382']
+# -
+
 title = 'presión inicial'
 chart_evolution(
     df, x='ETAPA_HIJO', father_name='Pozo 169', title='presión inicial por etapa'
@@ -518,15 +547,15 @@ chart_evolution(
 chart_evolution(
     df, x='ETAPA_HIJO', father_name='Pozo 212', title='presión inicial por etapa'
 )
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 212', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 5', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 382', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 91', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 28', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 175', title=title)
-chart_evolution(df, x='ETAPA_HIJO', father_name='Pozo 324', title=title)
+chart_evolution(df, x='order', father_name='Pozo 212', title=title)
+chart_evolution(df, x='order', father_name='Pozo 5', title=title)
+chart_evolution(df, x='order', father_name='Pozo 382', title=title)
+chart_evolution(df, x='order', father_name='Pozo 91', title=title)
+chart_evolution(df, x='order', father_name='Pozo 28', title=title)
+chart_evolution(df, x='order', father_name='Pozo 175', title=title)
+chart_evolution(df, x='order', father_name='Pozo 324', title=title)
 chart_evolution(
-    df, x='ETAPA_HIJO', y='delta_WHP', father_name='Pozo 324', title='delta de presion'
+    df, x='order', y='delta_WHP', father_name='Pozo 324', title='delta de presion'
 )
 
 
@@ -618,7 +647,31 @@ chart_evolution(df, father_name='Pozo 212', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 5', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 382', x='id_row', color='type')
 chart_evolution(df, father_name='Pozo 91', x='id_row', color='type')
+# -
 
+
+df['PADRE_int'] = df.PADRE.str[5:].astype(int)
+df['HIJO_int'] = df.HIJO.str[5:].astype(int)
+df['PAD_HIJO_int'] = df.PAD_HIJO.str[4:].astype(int)
+cut_off_dad = df.PADRE_int.quantile(0.25)
+cut_off_child = df.HIJO_int.quantile(0.25)
+cut_off_pad = df.PAD_HIJO_int.quantile(0.25)
+cut_off_stage = df.ETAPA_HIJO.quantile(0.25)
+print(
+    "padre int median:",
+)
+print("hijo int median:", df.HIJO_int.quantile(0.25))
+print("pad int median:", df.PAD_HIJO_int.quantile(0.25))
+print("etapa hijo median:", df.ETAPA_HIJO.quantile(0.25))
+df.groupby(
+    [
+        df.CAMPO,
+        df.PADRE_int > cut_off_dad,
+        df.PAD_HIJO_int > cut_off_pad,
+        df.HIJO_int > cut_off_child,
+        # df.ETAPA_HIJO>cut_off_stage
+    ]
+)['delta_WHP'].mean().reset_index()
 
 # + [markdown] id="0KrJZZAqZmlY"
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">4 | Funciones</div>
@@ -705,7 +758,7 @@ def get_agg_from_train(
         pd.Series: una columna con el nombre var_to_aggregate+'_'+function
     """
     if col_to_aggregate is None:
-        to_group = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
+        to_group = ['CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int']
         col_to_aggregate = ''
     else:
         to_group = col_to_aggregate
@@ -749,12 +802,12 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
     else:
         rolling_name = '_rolling' + str(rolling_name) + '_'
 
-    group_vars = ['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int']
+    group_vars = ['CAMPO', 'PADRE_int']
     df = df.sort_values(by=group_vars + ['WHP_i'])
     grouped = df.groupby(group_vars)
 
     for i in vars_dict:
-        print("Calculating " + i + " aggregations for rolling " + rolling_name + "..")
+        print("Calculating " + i + " aggregations for " + rolling_name + "..")
         for j in vars_dict[i]:
             var_name = i + rolling_name + j + fut_preffix
             print('\t' + var_name)
@@ -917,6 +970,11 @@ def fe(df):
     df['HIJO_group'] = df.HIJO_int.floordiv(10)
     df['PAD_HIJO_int'] = df.PAD_HIJO.str[4:].astype(int)
 
+    df['cut_off_dad'] = df.PADRE_int > df.PADRE_int.quantile(0.25)
+    df['cut_off_child'] = df.HIJO_int > df.HIJO_int.quantile(0.25)
+    df['cut_off_pad'] = df.PAD_HIJO_int > df.PAD_HIJO_int.quantile(0.25)
+    df['cut_off_stage'] = df.ETAPA_HIJO > df.ETAPA_HIJO.quantile(0.25)
+
     df['Tramo'] = None
     df.loc[df.ID_FILA < 17000, 'Tramo'] = 'Tramo 1'
     df.loc[(df.ID_FILA < 25618) & (df.Tramo.isna()), 'Tramo'] = 'Tramo 2'
@@ -937,13 +995,14 @@ def fe(df):
     df = stage_vars(df)
     df = df.merge(get_agg_from_train(df), how='left')
     df = df.merge(get_agg_from_train(df, function='median'), how='left')
+    df = df.merge(get_agg_from_train(df, function='max'), how='left')
 
     delta_aggs = {
         'delta_WHP': ['max', 'mean', 'median'],
     }
     # get historical dad statistics
-    df = get_dad_vars(df, delta_aggs)
-    df = get_dad_vars(df, delta_aggs, future=True)
+    # df = get_dad_vars(df, delta_aggs)
+    # df = get_dad_vars(df, delta_aggs, future=True)
 
     # variables from rolling6
     df = get_dad_vars(df, delta_aggs, rolling_window=6)
@@ -961,6 +1020,10 @@ def fe(df):
 
     # df = linear_regressor(df, var_to_predict='D3D', var_result_name='distance_pending')
     # df = linear_regressor(df, var_to_predict='WHP_i', var_result_name='initial_pressure_pending')
+
+    df['max_delta_prev_next_3_rel'] = df['max_delta_next_3'] / df['max_delta_prev_3']
+    df['mean_delta_prev_next_6_rel'] = df['mean_delta_next_6'] / df['mean_delta_prev_6']
+    df['max_delta_prev_next_6_rel'] = df['max_delta_next_6'] / df['max_delta_prev_6']
 
     df = df.sort_values(
         by=['FLUIDO', 'CAMPO', 'PAD_HIJO_int', 'PADRE_int', 'HIJO_int', 'ETAPA_HIJO']
@@ -1095,7 +1158,14 @@ df = fe(df)
 # ### Features
 
 # + id="KhHfwjnkdQQK"
-header_cols = ['ID_FILA', 'ID_EVENTO', 'type']
+header_cols = [
+    'ID_FILA',
+    'ID_EVENTO',
+    'type',
+    'cut_off_dad',
+    'cut_off_child',
+    'cut_off_pad',
+]
 model_features = [
     'CAMPO',
     'FLUIDO',
@@ -1111,7 +1181,8 @@ model_features = [
     'LINEAMIENTO',
     'WHP_i',
     'ESTADO',
-    # 'PADRE_int', 'HIJO_int', 'HIJO_group', 'PAD_HIJO_int', 'Tramo',
+    # 'PADRE_int', 'HIJO_int', 'PAD_HIJO_int', #'HIJO_group',
+    # 'Tramo',
     # 'prev_initial_pressure', 'prev_stage', 'prev_type', 'diff_prev_stage',
     'prev_pressure_relation',
     'prev_delta',
@@ -1131,12 +1202,13 @@ model_features = [
     'mean_delta_next_6',
     'AZ_D2D_oposite',
     # 'n_padres_in_stage', 'n_deltas_not_cero_in_stage',
-    # 'delta_WHP_mean',
+    'delta_WHP_mean',
+    'delta_WHP_max',
     # 'avg',
-    # 'delta_WHP_median',
-    'delta_WHP_historical_max',
-    'delta_WHP_historical_mean',
-    'delta_WHP_historical_median',
+    'delta_WHP_median',
+    # 'delta_WHP_historical_max',
+    # 'delta_WHP_historical_mean',
+    # 'delta_WHP_historical_median',
     # 'delta_WHP_historical_max_next', 'delta_WHP_historical_mean_next',
     # 'delta_WHP_historical_median_next',
     'delta_WHP_rolling6_max',
@@ -1149,6 +1221,12 @@ model_features = [
     'delta_WHP_rolling3_mean',
     'delta_WHP_rolling3_median',  # 'delta_WHP_rolling3_min',
     # 'delta_WHP_rolling3_max_next', 'delta_WHP_rolling3_mean_next', 'delta_WHP_rolling3_median_next','delta_WHP_rolling3_min_next'
+    # 'max_delta_prev_next_3_rel',
+    # 'mean_delta_prev_next_6_rel',
+    # 'max_delta_prev_next_6_rel'
+    # 'cut_off_dad',
+    # 'cut_off_child',
+    # 'cut_off_pad'
 ]
 target = 'delta_WHP'
 # -
@@ -1269,8 +1347,8 @@ params = {
 # -
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 0.9123
-# Best MAE fixed: 0.8280
+# Best MAE: 0.8934
+# Best MAE fixed: 0.8250
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -1308,6 +1386,8 @@ def print_real_vs_preds(aux):
 
 
 print_real_vs_preds(aux)
+
+
 # -
 
 # > En este gráfico se observan dos problemas a la hora de realizar predicciones,
@@ -1318,36 +1398,62 @@ print_real_vs_preds(aux)
 # 1. Evaluación mae para corrección de predicciones cercanas a 0
 
 # +
-results = pd.DataFrame(columns=['step', 'mae'])
-for i in np.arange(0.0, 5.0, 0.1):
-    current_fix = aux.copy()
-    current_fix.loc[abs(current_fix.preds) < i, 'preds'] = 0.0
-    results = pd.concat(
-        [
-            results,
-            pd.DataFrame(
-                {
-                    'step': [i],
-                    'mae': [
-                        mean_absolute_error(current_fix[target], current_fix['preds'])
-                    ],
-                }
-            ),
-        ]
-    )
+def return_opt_cut(aux):
+    results = pd.DataFrame(columns=['step', 'mae'])
+    for i in np.arange(0.0, 3.0, 0.1):
+        current_fix = aux.copy()
+        current_fix.loc[abs(current_fix.preds) < i, 'preds'] = 0.0
+        results = pd.concat(
+            [
+                results,
+                pd.DataFrame(
+                    {
+                        'step': [i],
+                        'mae': [
+                            mean_absolute_error(
+                                current_fix[target], current_fix['preds']
+                            )
+                        ],
+                    }
+                ),
+            ]
+        )
 
-fig = px.scatter(
-    results, x=results['step'], y=results['mae'], labels={'x': 'step', 'y': 'mae'}
-)
-fig.show()
+    fig = px.scatter(
+        results, x=results['step'], y=results['mae'], labels={'x': 'step', 'y': 'mae'}
+    )
+    fig.show()
+
+    return results.loc[results.mae == results.mae.min(), 'step'].values[0]
+
+
+group_list = ['CAMPO', 'cut_off_dad', 'cut_off_child', 'cut_off_pad']
+
+optimal_cuts = aux.groupby(group_list).apply(return_opt_cut)
+optimal_cuts = optimal_cuts.rename('optimal_cut')
+optimal_cuts = optimal_cuts.reset_index()
+optimal_cuts
 # -
 
-opt_cutoff = results.loc[results.mae == results.mae.min(), 'step'].values[0]
-opt_cutoff
-
-aux.loc[abs(aux.preds) < opt_cutoff, 'preds'] = 0.0
+aux = aux.merge(optimal_cuts, on=group_list, how='left')
+aux.loc[abs(aux.preds) < aux.optimal_cut, 'preds'] = 0.0
 mae = mean_absolute_error(aux[target], aux['preds'])
 print("MAE fixed:", mae)
+
+aux = df[df.type == 'Validation'].reset_index(drop=True)
+aux['preds'] = pd.Series(preds, name='preds')
+aux['diffReal'] = (aux[target] - aux['preds']).abs()
+mae = mean_absolute_error(aux[target], aux['preds'])
+print("MAE original:", mae)
+aux.loc[abs(aux.preds) < 2.5, 'preds'] = 0.0
+mae = mean_absolute_error(aux[target], aux['preds'])
+print("MAE fixed:", mae)
+
+# +
+# aux.loc[abs(aux.preds) < opt_cutoff, 'preds'] = 0.0
+# mae = mean_absolute_error(aux[target], aux['preds'])
+# print("MAE fixed:", mae)
+# -
 
 # 2. Deltas > 50 subestimados
 #
@@ -1415,20 +1521,22 @@ def predict(df, header_cols, feat_cols, target_col, model):
     to_infer_filter = df.type == 'Test'
     to_infer = df.loc[to_infer_filter, feat_cols]
 
-    result = df.loc[to_infer_filter, header_cols]
+    result = df.loc[to_infer_filter, header_cols + feat_cols]
     result[target_col] = model.predict(to_infer)
 
     return result
 
 
 submission = predict(df, header_cols, model_features, target, model_final)
+
 submission.head()
 # -
 
 
 # ### Fixes sobre file de submission
 
-submission.loc[abs(submission[target]) < opt_cutoff, target] = 0.0
+submission = submission.merge(optimal_cuts, on=group_list, how='left')
+submission.loc[abs(submission[target]) < submission.optimal_cut, target] = 0.0
 
 
 # ### Guardando solución
@@ -1440,7 +1548,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.7178 de score, 2 puesto hasta el momento
+# > Este modelo dio 0.6758 de score, 1 puesto hasta el momento!!
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
