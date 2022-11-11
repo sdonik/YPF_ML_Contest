@@ -120,6 +120,12 @@
 # - Submit 21
 #
 # Cambio de cálculo de variables en validación, se pasa delta_WHP a None previo a los cálculos de variables y se obtiene peor puntaje en validacion (0.929) pero confiando en un set de validación más estable, este intento dio 0.752 en lb
+#
+# - Submit 22
+#
+# Creación de la variable *estimated_next_delta2*, la misma toma como referencia la siguiente presión mas grande para ese pozo padre (considerando todos los hijos) y con esa presión calcula el delta estimado. Difiere de *estimated_next_delta* porque esta última solo ve la presión inicial de la siguiente etapa de cada pozo hijo.
+#
+# Luego de generar esta variable la validación mejora a 0.9123 y en lb se va a 0.7178 (muy cerquita del primer puesto)
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">3 | Obteniendo Data</div>
 #
@@ -152,7 +158,7 @@ TUNE_PARAMETERS = False
 root_folder = '../'
 submission_folder = root_folder + 'submissions/'
 data_folder = root_folder + 'data/'
-version = 'v21'
+version = 'v22'
 
 
 def read_data():
@@ -660,6 +666,10 @@ def shifted_vars(df, future=False):
         df[preffix + 'pressure_relation'] = (
             df[preffix + 'initial_pressure'] / df['WHP_i']
         )
+        # if there is more than one stage between rows put delta 0
+        df.loc[
+            (df['diff_' + preffix + 'stage'] != 1), 'estimated_' + preffix + 'delta'
+        ] = None
     else:
         df['diff_' + preffix + 'stage'] = df['ETAPA_HIJO'] - df[preffix + 'stage']
         df[preffix + 'pressure_relation'] = (
@@ -678,9 +688,6 @@ def shifted_vars(df, future=False):
     df['mean_delta_' + preffix + '6'] = grouped['delta_WHP'].transform(
         lambda x: x.rolling(window=window_6, min_periods=1).mean().shift(simple_shift)
     )
-
-    # if there is more than one stage between rows put delta 0
-    # df.loc[(df['diff_next_stage'] != 1), 'estimated_delta'] = None
 
     return df
 
@@ -747,7 +754,7 @@ def get_dad_vars(df, vars_dict, rolling_window=100, future=False):
     grouped = df.groupby(group_vars)
 
     for i in vars_dict:
-        print("Calculating " + i + " aggregations..")
+        print("Calculating " + i + " aggregations for rolling " + rolling_name + "..")
         for j in vars_dict[i]:
             var_name = i + rolling_name + j + fut_preffix
             print('\t' + var_name)
@@ -931,23 +938,26 @@ def fe(df):
     df = df.merge(get_agg_from_train(df), how='left')
     df = df.merge(get_agg_from_train(df, function='median'), how='left')
 
-    historical_agg = {
+    delta_aggs = {
         'delta_WHP': ['max', 'mean', 'median'],
     }
-    df = get_dad_vars(df, historical_agg)
-    df = get_dad_vars(df, historical_agg, future=True)
-
-    last_months_agg = {
-        'delta_WHP': ['max', 'mean', 'median', 'min'],
-    }
+    # get historical dad statistics
+    df = get_dad_vars(df, delta_aggs)
+    df = get_dad_vars(df, delta_aggs, future=True)
 
     # variables from rolling6
-    df = get_dad_vars(df, last_months_agg, rolling_window=6)
-    df = get_dad_vars(df, last_months_agg, rolling_window=6, future=True)
+    df = get_dad_vars(df, delta_aggs, rolling_window=6)
+    df = get_dad_vars(df, delta_aggs, rolling_window=6, future=True)
 
     # variables from rolling3
-    df = get_dad_vars(df, last_months_agg, rolling_window=3)
-    df = get_dad_vars(df, last_months_agg, rolling_window=3, future=True)
+    df = get_dad_vars(df, delta_aggs, rolling_window=3)
+    df = get_dad_vars(df, delta_aggs, rolling_window=3, future=True)
+
+    WHP_i_vars = {
+        'WHP_i': ['min'],
+    }
+    df = get_dad_vars(df, WHP_i_vars, rolling_window=1, future=True)
+    df['estimated_next_delta2'] = round(df['WHP_i_rolling1_min_next'] - df['WHP_i'], 3)
 
     # df = linear_regressor(df, var_to_predict='D3D', var_result_name='distance_pending')
     # df = linear_regressor(df, var_to_predict='WHP_i', var_result_name='initial_pressure_pending')
@@ -1042,9 +1052,6 @@ def validate_model(df, target_col, feat_cols, params):
     return gbm, y_pred
 
 
-# +
-
-
 def lgbm_cross_validation(df, target_col, feat_cols, params, n_splits=3):
 
     list_str_obj_cols = df[feat_cols].columns[df[feat_cols].dtypes == "object"].tolist()
@@ -1116,6 +1123,7 @@ model_features = [
     'next_type',
     'diff_next_stage',
     'estimated_next_delta',
+    'estimated_next_delta2',
     'next_pressure_relation',
     'next_delta',
     'max_delta_next_3',
@@ -1261,8 +1269,8 @@ params = {
 # -
 
 model, preds = validate_model(df[(df.type != 'Test')], target, model_features, params)
-# Best MAE: 0.9291
-# Best MAE fixed: 0.8453
+# Best MAE: 0.9123
+# Best MAE fixed: 0.8280
 
 # ### Análisis mayores diferencias respecto del target
 
@@ -1432,7 +1440,7 @@ submission[['ID_FILA', target]].to_csv(
 
 # -
 
-# > Este modelo dio 0.7529 de score, 2 puesto hasta el momento
+# > Este modelo dio 0.7178 de score, 2 puesto hasta el momento
 
 # # <div style="padding:20px;color:white;margin:0;font-size:100%;text-align:left;display:fill;border-radius:5px;background-color:#6A79BA;overflow:hidden">8 | Próximos pasos</div>
 #
