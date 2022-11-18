@@ -149,7 +149,6 @@ data/
 *.ipynb
 *.csv
 *.so
-*.zip
 .env
 kaggle.json
 .virtual_documents/
